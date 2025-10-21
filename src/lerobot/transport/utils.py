@@ -71,7 +71,6 @@ def receive_bytes_in_chunks(iterator, queue: Queue | None, shutdown_event: Event
     bytes_buffer = io.BytesIO()
     step = 0
 
-    logging.info(f"{log_prefix} Starting receiver")
     for item in iterator:
         logging.debug(f"{log_prefix} Received item")
         if shutdown_event.is_set():
