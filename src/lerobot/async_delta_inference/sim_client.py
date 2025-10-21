@@ -455,8 +455,15 @@ class SimClient:
         obs, reward, terminated, truncated, info = self.vec_env.step(np.array([action_array]))
         done = terminated[0] or truncated[0]
         
-        # Extract from vectorized format
-        obs = {k: v[0] for k, v in obs.items()}
+        # Extract from vectorized format - handle nested pixels dict
+        unwrapped_obs = {}
+        for k, v in obs.items():
+            if k == "pixels" and isinstance(v, dict):
+                # pixels is a nested dict, unwrap each camera image
+                unwrapped_obs[k] = {cam_name: img[0] for cam_name, img in v.items()}
+            else:
+                unwrapped_obs[k] = v[0]
+        obs = unwrapped_obs
         reward = reward[0]
         info = info[0]
         
@@ -542,6 +549,15 @@ class SimClient:
     def reset_environment(self):
         """Reset the simulation environment."""
         obs, info = self.vec_env.reset()
+        # Extract from vectorized format - handle nested pixels dict
+        unwrapped_obs = {}
+        for k, v in obs.items():
+            if k == "pixels" and isinstance(v, dict):
+                # pixels is a nested dict, unwrap each camera image
+                unwrapped_obs[k] = {cam_name: img[0] for cam_name, img in v.items()}
+            else:
+                unwrapped_obs[k] = v[0]
+        obs = unwrapped_obs
         info = info[0] if isinstance(info, (list, tuple)) else info
         self.current_episode_reward = 0.0
         return obs, info
