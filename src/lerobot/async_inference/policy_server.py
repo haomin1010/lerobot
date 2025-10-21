@@ -65,7 +65,7 @@ from .helpers import (
 
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     prefix = "policy_server"
-    logger = get_logger(prefix, console_level="ERROR")  # Only show WARNING and ERROR in console
+    logger = get_logger(prefix, console_level="WARNING")  # Only show WARNING and ERROR in console
 
     def __init__(self, config: PolicyServerConfig):
         self.config = config
