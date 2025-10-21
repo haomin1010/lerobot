@@ -47,6 +47,7 @@ import grpc
 import gymnasium as gym
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from lerobot.envs.configs import LiberoEnv  # noqa: F401
 from lerobot.envs.factory import make_env
@@ -464,7 +465,7 @@ class SimClient:
             else:
                 unwrapped_obs[k] = v[0]
         obs = unwrapped_obs
-        reward = reward[0]
+        reward = float(reward[0])  # Convert numpy scalar to Python float
         info = info[0] if isinstance(info, (list, tuple)) else info
         
         # Track episode reward
@@ -573,6 +574,10 @@ class SimClient:
         
         episode_count = 0
         step_count = 0
+        
+        # Get max steps from environment config
+        max_steps = getattr(self.config.env, 'episode_length', None)
+        pbar = None
 
         while self.running and episode_count < self.config.n_episodes:
             control_loop_start = time.perf_counter()
@@ -586,17 +591,43 @@ class SimClient:
                 obs, reward, done, info = self.control_loop_action(verbose)
                 step_count += 1
                 
+                # Create progress bar for first step of episode
+                if pbar is None:
+                    pbar = tqdm(
+                        total=max_steps,
+                        desc=f"Episode {episode_count + 1}/{self.config.n_episodes}",
+                        unit="step"
+                    )
+                
+                # Update progress bar
+                pbar.update(1)
+                
+                # Check if episode should end: either environment says done, or reached max steps
+                max_steps_reached = (
+                    hasattr(self.config.env, 'episode_length') 
+                    and step_count >= self.config.env.episode_length
+                )
+                episode_done = done or max_steps_reached
+                
                 # Check if episode is done
-                if done:
+                if episode_done:
                     episode_count += 1
                     self.episode_rewards.append(self.current_episode_reward)
                     
                     # Check if the episode was successful
-                    is_success = info.get("is_success", False)
+                    is_success = bool(info.get("is_success", False))  # Convert numpy bool to Python bool
                     self.episode_successes.append(is_success)
                     
+                    # Add reason for episode end
+                    end_reason = "max_steps" if max_steps_reached and not done else ("success" if is_success else "done")
+                    
+                    # Close progress bar
+                    if pbar is not None:
+                        pbar.close()
+                        pbar = None
+                    
                     self.logger.info(
-                        f"Episode {episode_count}/{self.config.n_episodes} finished | "
+                        f"Episode {episode_count}/{self.config.n_episodes} finished ({end_reason}) | "
                         f"Steps: {step_count} | "
                         f"Reward: {self.current_episode_reward:.4f} | "
                         f"Success: {is_success}"
@@ -611,6 +642,10 @@ class SimClient:
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - control_loop_start)))
+        
+        # Close progress bar if still open
+        if pbar is not None:
+            pbar.close()
 
         # Log final statistics
         if self.episode_rewards:
