@@ -530,8 +530,7 @@ class SimClient:
                 return data
         
         obs = extract_first_element(obs)
-        print(obs)
-        time.sleep(10)
+
         info = info[0] if isinstance(info, (list, tuple)) else info
         self.current_episode_reward = 0.0
         return obs, info
