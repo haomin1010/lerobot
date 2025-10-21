@@ -264,7 +264,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return services_pb2.Empty()
 
         except Exception as e:
+            import traceback
             self.logger.error(f"Error in StreamActions: {e}")
+            self.logger.error(f"Full traceback:\n{traceback.format_exc()}")
 
             return services_pb2.Empty()
 
