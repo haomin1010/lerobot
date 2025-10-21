@@ -38,6 +38,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import Path
 from pprint import pformat
 from queue import Queue
 from typing import Any
@@ -56,6 +57,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
+from lerobot.utils.io_utils import write_video
 
 from ..async_inference.helpers import (
     Action,
@@ -256,6 +258,16 @@ class SimClient:
         self.episode_steps = []
         self.current_episode_reward = 0.0
         self.current_episode_steps = 0
+        
+        # Video recording
+        if config.save_videos:
+            self.videos_dir = Path(config.videos_dir)
+            self.videos_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Videos will be saved to: {self.videos_dir}")
+        else:
+            self.videos_dir = None
+        self.n_episodes_rendered = 0
+        self.current_episode_frames = []
 
     @property
     def running(self):
@@ -511,6 +523,47 @@ class SimClient:
         """Convert action tensor to numpy array for environment step."""
         return action_tensor.cpu().numpy()
 
+    def _render_frame(self):
+        """Render and capture current frame from environment."""
+        if self.videos_dir is not None and self.n_episodes_rendered < self.config.max_episodes_rendered:
+            try:
+                # Render frame from the environment
+                frames = self.vec_env.call("render")
+                if frames and len(frames) > 0:
+                    # frames is a list of frames for each env in VectorEnv
+                    # We only have 1 env, so take the first
+                    frame = frames[0]
+                    self.current_episode_frames.append(frame)
+            except Exception as e:
+                self.logger.warning(f"Failed to render frame: {e}")
+    
+    def _save_episode_video(self, episode_num: int, steps: int, success: bool):
+        """Save video for the completed episode."""
+        if not self.current_episode_frames:
+            self.logger.warning(f"No frames to save for episode {episode_num}")
+            return
+        
+        # Create video filename
+        status = "success" if success else "fail"
+        video_filename = f"episode_{episode_num:03d}_{status}_steps_{steps}.mp4"
+        video_path = self.videos_dir / video_filename
+        
+        try:
+            # Stack frames: list of (H, W, C) -> (T, H, W, C)
+            frames_array = np.stack(self.current_episode_frames, axis=0)
+            
+            # Save video in a separate thread to avoid blocking
+            thread = threading.Thread(
+                target=write_video,
+                args=(str(video_path), frames_array, self.config.fps),
+                daemon=True,
+            )
+            thread.start()
+            
+            self.logger.info(f"Saving video: {video_path} ({len(self.current_episode_frames)} frames)")
+        except Exception as e:
+            self.logger.error(f"Failed to save video for episode {episode_num}: {e}")
+
     def control_loop_action(self, verbose: bool = False) -> tuple[np.ndarray, float, bool, dict]:
         """Execute action from queue in the environment.
         
@@ -530,6 +583,9 @@ class SimClient:
         
         # Execute action in environment
         obs, reward, terminated, truncated, info = self.vec_env.step(np.array([action_array]))
+        
+        # Render frame after action (for video recording)
+        self._render_frame()
         
         # Track episode steps BEFORE incrementing (since we increment after this function)
         will_exceed_max_steps = (self.current_episode_steps + 1) >= self.max_episode_steps
@@ -684,6 +740,12 @@ class SimClient:
         # Mark that we need to reset policy state for the next observation
         self._reset_policy_on_next_obs = True
         
+        # Reset frame buffer for new episode
+        self.current_episode_frames = []
+        
+        # Render initial frame
+        self._render_frame()
+        
         self.logger.debug(
             f"Environment reset (seed={seed}). Max steps for this episode: {self.max_episode_steps}"
         )
@@ -771,6 +833,11 @@ class SimClient:
                         # Reset latest_action counter for the new episode
                         with self.latest_action_lock:
                             self.latest_action = -1
+                        
+                        # Save video for this episode
+                        if self.videos_dir is not None and self.n_episodes_rendered < self.config.max_episodes_rendered:
+                            self._save_episode_video(episode_count, episode_steps, is_success)
+                            self.n_episodes_rendered += 1
 
                 self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
                 # Dynamically adjust sleep time to maintain the desired control frequency

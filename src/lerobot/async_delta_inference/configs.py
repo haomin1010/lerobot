@@ -106,6 +106,13 @@ class SimClientConfig:
     # Seed for reproducibility (if None, uses random initialization)
     seed: int | None = field(default=1000, metadata={"help": "Random seed for reproducibility"})
 
+    # Video recording configuration
+    save_videos: bool = field(default=False, metadata={"help": "Save videos of episodes"})
+    max_episodes_rendered: int = field(
+        default=10, metadata={"help": "Maximum number of episodes to render as videos"}
+    )
+    videos_dir: str = field(default="outputs/videos", metadata={"help": "Directory to save videos"})
+
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
@@ -183,6 +190,9 @@ class SimClientConfig:
             "max_actions_to_use": self.max_actions_to_use,
             "request_new_at": self.request_new_at,
             "replace_actions_on_new": self.replace_actions_on_new,
+            "save_videos": self.save_videos,
+            "max_episodes_rendered": self.max_episodes_rendered,
+            "videos_dir": self.videos_dir,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
         }
