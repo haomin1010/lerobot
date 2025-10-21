@@ -47,8 +47,6 @@ MODEL_PATH=${MODEL_PATH:-"HuggingFaceVLA/smolvla_libero"}
 DEVICE=${DEVICE:-"cuda"}
 N_EPISODES=${N_EPISODES:-"5"}
 ACTIONS_PER_CHUNK=${ACTIONS_PER_CHUNK:-"50"}
-SAVE_VIDEOS=${SAVE_VIDEOS:-"true"}
-VIDEOS_DIR=${VIDEOS_DIR:-"outputs/videos"}
 
 echo "2. 配置信息:"
 echo "   服务器地址: $HOST:$PORT"
@@ -58,8 +56,6 @@ echo "   策略: $POLICY_TYPE"
 echo "   模型: $MODEL_PATH"
 echo "   设备: $DEVICE"
 echo "   评估集数: $N_EPISODES"
-echo "   保存视频: $SAVE_VIDEOS"
-echo "   视频目录: $VIDEOS_DIR"
 echo ""
 
 # 创建日志目录
@@ -112,16 +108,10 @@ python -m lerobot.async_delta_inference.sim_client \
     --pretrained_name_or_path=$MODEL_PATH \
     --policy_device=$DEVICE \
     --actions_per_chunk=$ACTIONS_PER_CHUNK \
-    --max_actions_to_use=20 \
-    --request_new_at=10 \
-    --replace_actions_on_new=true \
     --chunk_size_threshold=0.5 \
     --aggregate_fn_name=weighted_average \
     --n_episodes=$N_EPISODES \
     --fps=$FPS \
-    --seed=1000 \
-    --save_videos=$SAVE_VIDEOS \
-    --videos_dir=$VIDEOS_DIR \
     --server_address=$HOST:$PORT
 
 echo ""
