@@ -64,42 +64,44 @@ mkdir -p logs
 # 启动 PolicyServer
 echo "3. 启动 PolicyServer..."
 
-# 设置日志级别为 INFO
-export LEROBOT_LOG_LEVEL=INFO
-
 python -m lerobot.async_inference.policy_server \
     --host=$HOST \
     --port=$PORT \
     --fps=$FPS \
     --inference_latency=0.033 \
-    --obs_queue_timeout=2 \
-    > logs/policy_server.log 2>&1 &
+    --obs_queue_timeout=2 &
 
 SERVER_PID=$!
 echo "✅ PolicyServer 已启动 (PID: $SERVER_PID)"
-echo "   日志: logs/policy_server.log"
 echo ""
 
 # 等待服务器启动并检查
 echo "4. 等待服务器就绪..."
-sleep 2
+sleep 3
 
 # 检查服务器是否正常运行
 if ! ps -p $SERVER_PID > /dev/null 2>&1; then
     echo "❌ PolicyServer 启动失败！"
-    echo "查看日志: cat logs/policy_server.log"
-    cat logs/policy_server.log
+    echo "查看日志目录: ls -lth logs/"
+    ls -lth logs/
+    echo ""
+    echo "最新日志内容:"
+    LOG_FILE=$(ls -t logs/policy_server_*.log 2>/dev/null | head -1)
+    if [ -n "$LOG_FILE" ]; then
+        cat "$LOG_FILE"
+    fi
     exit 1
 fi
 
-# 检查日志文件是否有内容
+# 查找实际的日志文件（带时间戳）
 sleep 1
-if [ ! -s logs/policy_server.log ]; then
-    echo "⚠️  警告: 服务器日志文件为空"
-else
-    echo "✅ 服务器日志正常"
+LOG_FILE=$(ls -t logs/policy_server_*.log 2>/dev/null | head -1)
+if [ -n "$LOG_FILE" ]; then
+    echo "✅ 服务器日志文件: $LOG_FILE"
     echo "最新日志:"
-    tail -5 logs/policy_server.log
+    tail -10 "$LOG_FILE"
+else
+    echo "⚠️  警告: 未找到服务器日志文件"
 fi
 echo ""
 

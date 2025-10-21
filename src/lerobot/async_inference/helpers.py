@@ -154,16 +154,25 @@ def prepare_raw_observation(
     image_keys = list(filter(is_image_key, lerobot_obs))
     # state's shape is expected as (B, state_dim)
     state_dict = {OBS_STATE: extract_state_from_raw_observation(lerobot_obs)}
-    image_dict = {
-        image_k: extract_images_from_raw_observation(lerobot_obs, image_k) for image_k in image_keys
-    }
 
     # Turns the image features to (C, H, W) with H, W matching the policy image features.
     # This reduces the resolution of the images
-    image_dict = {
-        key: resize_robot_observation_image(torch.tensor(lerobot_obs[key]), policy_image_features[key].shape)
-        for key in image_keys
-    }
+    
+    # Debug: log the keys to identify mismatch
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[DEBUG] image_keys from lerobot_obs: {image_keys}")
+    logger.info(f"[DEBUG] policy_image_features keys: {list(policy_image_features.keys())}")
+    
+    image_dict = {}
+    for key in image_keys:
+        if key not in policy_image_features:
+            logger.error(f"[ERROR] Key '{key}' not found in policy_image_features!")
+            logger.error(f"Available keys: {list(policy_image_features.keys())}")
+            raise KeyError(f"Image key '{key}' not found in policy_image_features")
+        image_dict[key] = resize_robot_observation_image(
+            torch.tensor(lerobot_obs[key]), policy_image_features[key].shape
+        )
 
     if "task" in robot_obs:
         state_dict["task"] = robot_obs["task"]
