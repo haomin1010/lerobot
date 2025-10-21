@@ -114,6 +114,9 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     - 'agent_pos' -> 'observation.state'
     """
     raw_obs: RawObservation = {}
+    print(obs)
+    print("11111111111")
+    time.sleep("1111111111111")
     
     # Process images
     if "pixels" in obs:
