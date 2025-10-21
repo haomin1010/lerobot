@@ -591,6 +591,17 @@ class SimClient:
                 obs, reward, done, info = self.control_loop_action(verbose)
                 step_count += 1
                 
+                # Create progress bar for first step of episode
+                if pbar is None:
+                    pbar = tqdm(
+                        total=max_steps,
+                        desc=f"Episode {episode_count + 1}/{self.config.n_episodes}",
+                        unit="step"
+                    )
+                
+                # Update progress bar
+                pbar.update(1)
+                
                 # Check if episode should end: either environment says done, or reached max steps
                 max_steps_reached = (
                     hasattr(self.config.env, 'episode_length') 
@@ -610,6 +621,11 @@ class SimClient:
                     # Add reason for episode end
                     end_reason = "max_steps" if max_steps_reached and not done else ("success" if is_success else "done")
                     
+                    # Close progress bar
+                    if pbar is not None:
+                        pbar.close()
+                        pbar = None
+                    
                     self.logger.info(
                         f"Episode {episode_count}/{self.config.n_episodes} finished ({end_reason}) | "
                         f"Steps: {step_count} | "
@@ -626,6 +642,10 @@ class SimClient:
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - control_loop_start)))
+        
+        # Close progress bar if still open
+        if pbar is not None:
+            pbar.close()
 
         # Log final statistics
         if self.episode_rewards:
