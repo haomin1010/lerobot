@@ -615,7 +615,7 @@ class SimClient:
                     self.episode_rewards.append(self.current_episode_reward)
                     
                     # Check if the episode was successful
-                    is_success = info.get("is_success", False)
+                    is_success = bool(info.get("is_success", False))  # Convert numpy bool to Python bool
                     self.episode_successes.append(is_success)
                     
                     # Add reason for episode end
