@@ -74,9 +74,35 @@ from .constants import SUPPORTED_ENVS
 
 def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:
     """Convert environment configuration to lerobot features format."""
-    from dataclasses import asdict
-    # Build the features dictionary based on environment configuration
-    return {f"observation.{k}": asdict(v) for k, v in env_config.features.items() if k != "action"}
+    from lerobot.configs.types import FeatureType
+    from lerobot.utils.constants import OBS_STR
+    
+    # Build the features dictionary in the LeRobot dataset format (with dtype, shape, names)
+    features = {}
+    
+    for key, policy_ft in env_config.features.items():
+        if key == "action":
+            continue
+        
+        # Convert PolicyFeature to dataset feature format
+        if policy_ft.type == FeatureType.VISUAL:
+            # For images: dtype is "image" or "video", shape is (H, W, C)
+            lerobot_key = env_config.features_map.get(key, f"{OBS_STR}.images.{key}")
+            features[lerobot_key] = {
+                "dtype": "image",
+                "shape": policy_ft.shape,  # Already in (H, W, C) format from env config
+                "names": ["height", "width", "channels"],
+            }
+        elif policy_ft.type == FeatureType.STATE:
+            # For state: dtype is "float32", shape is (state_dim,)
+            lerobot_key = env_config.features_map.get(key, f"{OBS_STR}.state")
+            features[lerobot_key] = {
+                "dtype": "float32",
+                "shape": policy_ft.shape,
+                "names": [f"state_{i}" for i in range(policy_ft.shape[0])],
+            }
+    
+    return features
 
 
 def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObservation:
@@ -530,7 +556,6 @@ class SimClient:
                 return data
         
         obs = extract_first_element(obs)
-
         info = info[0] if isinstance(info, (list, tuple)) else info
         self.current_episode_reward = 0.0
         return obs, info
