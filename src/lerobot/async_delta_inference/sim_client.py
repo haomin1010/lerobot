@@ -114,9 +114,6 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     - 'agent_pos' -> 'observation.state'
     """
     raw_obs: RawObservation = {}
-    print(obs)
-    print("11111111111")
-    time.sleep(5)
     
     # Process images
     if "pixels" in obs:
@@ -139,6 +136,9 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     # Add task if provided
     if task:
         raw_obs["task"] = task
+    print(raw_obs["task"])
+    print("11111111111")
+    time.sleep(5)
     
     return raw_obs
 
@@ -497,7 +497,7 @@ class SimClient:
             start_time = time.perf_counter()
 
             # Format environment observation to robot observation format
-            raw_observation: RawObservation = _format_env_observation(obs, self.config.env, task)
+            raw_observation: RawObservation = _format_env_observation(obs, self.config.env, self.env.task_description)
 
             with self.latest_action_lock:
                 latest_action = self.latest_action
