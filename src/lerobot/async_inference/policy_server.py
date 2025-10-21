@@ -232,9 +232,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 self._predicted_timesteps.add(obs.get_timestep())
 
             start_time = time.perf_counter()
-            self.logger.info(
-                "1111111111111111111a"
-            )
+
             action_chunk = self._predict_action_chunk(obs)
             inference_time = time.perf_counter() - start_time
 
@@ -242,9 +240,6 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             actions_bytes = pickle.dumps(action_chunk)  # nosec
             serialize_time = time.perf_counter() - start_time
 
-            self.logger.info(
-                "1111111111111111111b"
-            )
 
             # Create and return the action chunk
             actions = services_pb2.Actions(data=actions_bytes)
@@ -347,6 +342,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         5. Convert to TimedAction list
         """
         """1. Prepare observation"""
+        print("1111111a")
+        time.sleep(1)
         start_prepare = time.perf_counter()
         observation: Observation = raw_observation_to_observation(
             observation_t.get_observation(),
@@ -355,12 +352,16 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         )
         prepare_time = time.perf_counter() - start_prepare
 
+        print("1111111b")
+        time.sleep(1)
         """2. Apply preprocessor"""
         start_preprocess = time.perf_counter()
         observation = self.preprocessor(observation)
         self.last_processed_obs: TimedObservation = observation_t
         preprocessing_time = time.perf_counter() - start_preprocess
 
+        print("1111111c")
+        time.sleep(1)
         """3. Get action chunk"""
         start_inference = time.perf_counter()
         # Reset policy state if requested (e.g., at the start of a new episode)
@@ -369,7 +370,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.logger.debug("Policy state reset for new episode")
         # Ensure policy is in eval mode before inference
         self.policy.eval()
-        
+
+        print("1111111d")
+        time.sleep(1)
         # ========== 调试信息：模型输入前 ==========
         self.logger.info(f"=" * 80)
         self.logger.info(f"[DEBUG] 观测 #{observation_t.get_timestep()} - 模型输入前调试信息")

@@ -136,8 +136,6 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     # Add task if provided
     if task:
         raw_obs["task"] = task
-    print(raw_obs["task"])
-    print("11111111111")
     time.sleep(5)
     
     return raw_obs
