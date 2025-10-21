@@ -230,7 +230,7 @@ class HILSerlRobotEnvConfig(EnvConfig):
 class LiberoEnv(EnvConfig):
     task: str = "libero_10"  # can also choose libero_spatial, libero_object, etc.
     fps: int = 30
-    episode_length: int = 520
+    episode_length: int = 520  # Default, will be overridden in __post_init__ based on task
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
     camera_name: str = "agentview_image,robot0_eye_in_hand_image"
@@ -253,6 +253,21 @@ class LiberoEnv(EnvConfig):
     )
 
     def __post_init__(self):
+        # Set episode_length based on task suite
+        # These values are from libero.py TASK_SUITE_MAX_STEPS
+        task_suite_max_steps = {
+            "libero_spatial": 280,
+            "libero_object": 280,
+            "libero_goal": 300,
+            "libero_10": 520,
+            "libero_90": 400,
+        }
+        
+        # Extract suite name from task (handles comma-separated tasks)
+        suite_name = self.task.split(",")[0].strip()
+        if suite_name in task_suite_max_steps:
+            self.episode_length = task_suite_max_steps[suite_name]
+        
         if self.obs_type == "pixels":
             self.features["pixels/image"] = PolicyFeature(
                 type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
