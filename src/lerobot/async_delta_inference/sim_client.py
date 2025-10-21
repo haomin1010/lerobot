@@ -317,34 +317,44 @@ class SimClient:
                 return x2
 
         future_action_queue = Queue()
+        
+        # Get current queue state
         with self.action_queue_lock:
             internal_queue = self.action_queue.queue
+        
+        with self.latest_action_lock:
+            latest_action = self.latest_action
+        
+        # If replace_actions_on_new is True, discard all old actions and use only new ones
+        if self.config.replace_actions_on_new:
+            # Simply add all new actions that are newer than latest_action
+            for new_action in incoming_actions:
+                if new_action.get_timestep() > latest_action:
+                    future_action_queue.put(new_action)
+        else:
+            # Keep old actions and merge with new ones (original behavior)
+            current_action_queue = {action.get_timestep(): action.get_action() for action in internal_queue}
 
-        current_action_queue = {action.get_timestep(): action.get_action() for action in internal_queue}
+            for new_action in incoming_actions:
+                # New action is older than the latest action in the queue, skip it
+                if new_action.get_timestep() <= latest_action:
+                    continue
 
-        for new_action in incoming_actions:
-            with self.latest_action_lock:
-                latest_action = self.latest_action
+                # If the new action's timestep is not in the current action queue, add it directly
+                elif new_action.get_timestep() not in current_action_queue:
+                    future_action_queue.put(new_action)
+                    continue
 
-            # New action is older than the latest action in the queue, skip it
-            if new_action.get_timestep() <= latest_action:
-                continue
-
-            # If the new action's timestep is not in the current action queue, add it directly
-            elif new_action.get_timestep() not in current_action_queue:
-                future_action_queue.put(new_action)
-                continue
-
-            # If the new action's timestep is in the current action queue, aggregate it
-            future_action_queue.put(
-                TimedAction(
-                    timestamp=new_action.get_timestamp(),
-                    timestep=new_action.get_timestep(),
-                    action=aggregate_fn(
-                        current_action_queue[new_action.get_timestep()], new_action.get_action()
-                    ),
+                # If the new action's timestep is in the current action queue, aggregate it
+                future_action_queue.put(
+                    TimedAction(
+                        timestamp=new_action.get_timestamp(),
+                        timestep=new_action.get_timestep(),
+                        action=aggregate_fn(
+                            current_action_queue[new_action.get_timestep()], new_action.get_action()
+                        ),
+                    )
                 )
-            )
 
         with self.action_queue_lock:
             self.action_queue = future_action_queue
@@ -556,7 +566,7 @@ class SimClient:
 
     def reset_environment(self):
         """Reset the simulation environment."""
-        obs, info = self.vec_env.reset(seed=self.config.seed)
+        obs, info = self.vec_env.reset()
         # Extract from vectorized format - handle nested pixels dict
         unwrapped_obs = {}
         for k, v in obs.items():
@@ -581,6 +591,7 @@ class SimClient:
         
         episode_count = 0
         step_count = 0
+        steps_since_last_request = 0  # Track steps for periodic requests
         
         # Get max steps from environment config
         max_steps = getattr(self.config.env, 'episode_length', None)
@@ -589,14 +600,26 @@ class SimClient:
         while self.running and episode_count < self.config.n_episodes:
             control_loop_start = time.perf_counter()
             
-            # (1) Send observation if ready
-            if self._ready_to_send_observation():
+            # Check if we should request new actions based on periodic trigger
+            periodic_request_needed = (
+                self.config.request_new_every_n_steps is not None 
+                and steps_since_last_request >= self.config.request_new_every_n_steps
+            )
+            
+            # (1) Send observation if ready (based on queue size or periodic trigger)
+            if self._ready_to_send_observation() or periodic_request_needed:
                 self.control_loop_observation(obs, task, verbose)
+                if periodic_request_needed:
+                    steps_since_last_request = 0  # Reset counter after request
+                    self.logger.debug(
+                        f"Periodic action request triggered (every {self.config.request_new_every_n_steps} steps)"
+                    )
             
             # (2) Perform action if available
             if self.actions_available():
                 obs, reward, done, info = self.control_loop_action(verbose)
                 step_count += 1
+                steps_since_last_request += 1  # Increment counter for periodic requests
                 
                 # Create progress bar for first step of episode
                 if pbar is None:
@@ -641,6 +664,7 @@ class SimClient:
                     )
                     
                     step_count = 0
+                    steps_since_last_request = 0  # Reset periodic request counter for new episode
                     
                     # Reset environment for next episode if not done with all episodes
                     if episode_count < self.config.n_episodes:

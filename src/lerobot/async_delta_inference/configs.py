@@ -80,6 +80,12 @@ class SimClientConfig:
         default=True,
         metadata={"help": "Replace remaining actions with new predictions (default: True)"}
     )
+    
+    # Request new actions every N steps (None to disable periodic requests)
+    request_new_every_n_steps: int | None = field(
+        default=None,
+        metadata={"help": "Request new actions every N steps (None to disable, triggers regardless of queue size)"}
+    )
 
     # Task instruction for the simulation to execute (e.g., 'fold my tshirt')
     task: str = field(default="", metadata={"help": "Task instruction for the simulation to execute"})
