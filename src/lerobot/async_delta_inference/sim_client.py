@@ -465,6 +465,8 @@ class SimClient:
                 unwrapped_obs[k] = v[0]
         obs = unwrapped_obs
         reward = reward[0]
+
+        print("info=",info)
         info = info[0]
         
         # Track episode reward
