@@ -93,7 +93,10 @@ def raw_observation_to_observation(
     observation = {}
 
     observation = prepare_raw_observation(raw_observation, lerobot_features, policy_image_features)
+    print("a111111a1")
     for k, v in observation.items():
+        print("a111111a2")
+        print(k)
         if isinstance(v, torch.Tensor):  # VLAs present natural-language instructions in observations
             if "image" in k:
                 # Policy expects images in shape (B, C, H, W)
