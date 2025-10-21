@@ -176,16 +176,30 @@ def rollout(
             
             for key, value in observation.items():
                 if isinstance(value, torch.Tensor):
-                    logging.info(
+                    info_str = (
                         f"  {key}:\n"
                         f"    - shape: {value.shape}\n"
                         f"    - dtype: {value.dtype}\n"
                         f"    - device: {value.device}\n"
-                        f"    - min: {value.min().item():.6f}\n"
-                        f"    - max: {value.max().item():.6f}\n"
-                        f"    - mean: {value.mean().item():.6f}\n"
-                        f"    - std: {value.std().item():.6f}"
                     )
+                    
+                    # 只对浮点类型计算统计信息
+                    if value.dtype in [torch.float16, torch.float32, torch.float64]:
+                        info_str += (
+                            f"    - min: {value.min().item():.6f}\n"
+                            f"    - max: {value.max().item():.6f}\n"
+                            f"    - mean: {value.mean().item():.6f}\n"
+                            f"    - std: {value.std().item():.6f}"
+                        )
+                    else:
+                        # 对整数类型只显示 min/max
+                        info_str += (
+                            f"    - min: {value.min().item()}\n"
+                            f"    - max: {value.max().item()}"
+                        )
+                    
+                    logging.info(info_str)
+                    
                     if "image" in key.lower() or "camera" in key.lower():
                         flat_values = value.flatten()[:10]
                         logging.info(f"    - 前10个像素值: {flat_values.tolist()}")

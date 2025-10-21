@@ -296,15 +296,27 @@ class SmolVLAPolicy(PreTrainedPolicy):
         
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
-                logger.info(
+                info_str = (
                     f"  {key}:\n"
                     f"    - shape: {value.shape}\n"
                     f"    - dtype: {value.dtype}\n"
                     f"    - device: {value.device}\n"
-                    f"    - min: {value.min().item():.6f}\n"
-                    f"    - max: {value.max().item():.6f}\n"
-                    f"    - mean: {value.mean().item():.6f}"
                 )
+                
+                # 只对浮点类型计算统计信息
+                if value.dtype in [torch.float16, torch.float32, torch.float64]:
+                    info_str += (
+                        f"    - min: {value.min().item():.6f}\n"
+                        f"    - max: {value.max().item():.6f}\n"
+                        f"    - mean: {value.mean().item():.6f}"
+                    )
+                else:
+                    info_str += (
+                        f"    - min: {value.min().item()}\n"
+                        f"    - max: {value.max().item()}"
+                    )
+                
+                logger.info(info_str)
                 if value.numel() <= 50:
                     logger.info(f"    - 值: {value.flatten()[:50].tolist()}")
             else:

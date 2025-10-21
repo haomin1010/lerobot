@@ -374,16 +374,30 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # 打印每个观测项的详细信息
         for key, value in observation.items():
             if isinstance(value, torch.Tensor):
-                self.logger.info(
+                info_str = (
                     f"  {key}:\n"
                     f"    - shape: {value.shape}\n"
                     f"    - dtype: {value.dtype}\n"
                     f"    - device: {value.device}\n"
-                    f"    - min: {value.min().item():.6f}\n"
-                    f"    - max: {value.max().item():.6f}\n"
-                    f"    - mean: {value.mean().item():.6f}\n"
-                    f"    - std: {value.std().item():.6f}"
                 )
+                
+                # 只对浮点类型计算统计信息
+                if value.dtype in [torch.float16, torch.float32, torch.float64]:
+                    info_str += (
+                        f"    - min: {value.min().item():.6f}\n"
+                        f"    - max: {value.max().item():.6f}\n"
+                        f"    - mean: {value.mean().item():.6f}\n"
+                        f"    - std: {value.std().item():.6f}"
+                    )
+                else:
+                    # 对整数类型只显示 min/max
+                    info_str += (
+                        f"    - min: {value.min().item()}\n"
+                        f"    - max: {value.max().item()}"
+                    )
+                
+                self.logger.info(info_str)
+                
                 # 如果是图像，打印前几个像素值
                 if "image" in key.lower() or "camera" in key.lower():
                     flat_values = value.flatten()[:10]
