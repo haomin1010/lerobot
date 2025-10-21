@@ -219,15 +219,17 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         chunk, containing multiple actions."""
         client_id = context.peer()
         self.logger.debug(f"Client {client_id} connected for action streaming")
-
+        print("1111111111111111111111aaaa")
         # Generate action based on the most recent observation and its timestep
         try:
+            print("1111111111111111111111aa")
             getactions_starts = time.perf_counter()
             obs = self.observation_queue.get(timeout=self.config.obs_queue_timeout)
+            print("1111111111111111111111ab")
             self.logger.info(
                 f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
             )
-
+            print("1111111111111111111111ac")
             with self._predicted_timesteps_lock:
                 self._predicted_timesteps.add(obs.get_timestep())
 
