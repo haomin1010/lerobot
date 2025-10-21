@@ -47,7 +47,6 @@ import grpc
 import gymnasium as gym
 import numpy as np
 import torch
-from tqdm import tqdm
 
 from lerobot.envs.configs import LiberoEnv  # noqa: F401
 from lerobot.envs.factory import make_env
@@ -574,10 +573,6 @@ class SimClient:
         
         episode_count = 0
         step_count = 0
-        
-        # Create episode progress bar
-        episode_pbar = tqdm(total=self.config.n_episodes, desc="Episodes", position=0)
-        step_pbar = None
 
         while self.running and episode_count < self.config.n_episodes:
             control_loop_start = time.perf_counter()
@@ -591,14 +586,6 @@ class SimClient:
                 obs, reward, done, info = self.control_loop_action(verbose)
                 step_count += 1
                 
-                # Create step progress bar for first step of episode
-                if step_pbar is None:
-                    step_pbar = tqdm(desc=f"Episode {episode_count + 1} steps", position=1, leave=False)
-                
-                # Update step progress bar
-                step_pbar.update(1)
-                step_pbar.set_postfix({"reward": f"{self.current_episode_reward:.2f}"})
-                
                 # Check if episode is done
                 if done:
                     episode_count += 1
@@ -608,18 +595,12 @@ class SimClient:
                     is_success = info.get("is_success", False)
                     self.episode_successes.append(is_success)
                     
-                    # Close step progress bar
-                    if step_pbar is not None:
-                        step_pbar.close()
-                        step_pbar = None
-                    
-                    # Update episode progress bar
-                    episode_pbar.update(1)
-                    episode_pbar.set_postfix({
-                        "steps": step_count,
-                        "reward": f"{self.current_episode_reward:.2f}",
-                        "success": is_success
-                    })
+                    self.logger.info(
+                        f"Episode {episode_count}/{self.config.n_episodes} finished | "
+                        f"Steps: {step_count} | "
+                        f"Reward: {self.current_episode_reward:.4f} | "
+                        f"Success: {is_success}"
+                    )
                     
                     step_count = 0
                     
@@ -630,11 +611,6 @@ class SimClient:
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - control_loop_start)))
-        
-        # Close progress bars
-        if step_pbar is not None:
-            step_pbar.close()
-        episode_pbar.close()
 
         # Log final statistics
         if self.episode_rewards:
