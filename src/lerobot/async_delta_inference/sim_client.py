@@ -691,14 +691,23 @@ class SimClient:
 
             # If there are no actions left in the queue, the observation must go through processing!
             with self.action_queue_lock:
+                # Only clear must_go if queue is NOT empty (i.e., we have received actions)
+                # If queue is still empty, keep must_go set so server will process the observation
                 observation.must_go = self.must_go.is_set() and self.action_queue.empty()
                 current_queue_size = self.action_queue.qsize()
+
+            self.logger.info(
+                f"[DEBUG] Sending obs: must_go_flag={self.must_go.is_set()}, "
+                f"queue_empty={self.action_queue.empty()}, must_go={observation.must_go}"
+            )
 
             _ = self.send_observation(observation)
 
             self.logger.debug(f"QUEUE SIZE: {current_queue_size} (Must go: {observation.must_go})")
-            if observation.must_go:
-                # must-go event will be set again after receiving actions
+            # Only clear must_go after we've sent an observation AND we have actions in the queue
+            # This prevents clearing the flag before the first actions arrive
+            if observation.must_go and current_queue_size > 0:
+                # must-go event will be set again after queue becomes empty
                 self.must_go.clear()
 
             if verbose:
