@@ -466,8 +466,7 @@ class SimClient:
         obs = unwrapped_obs
         reward = reward[0]
 
-        print("info=",info)
-        info = info[0]
+        info = info[0] if isinstance(info, (list, tuple)) else info
         
         # Track episode reward
         self.current_episode_reward += reward
