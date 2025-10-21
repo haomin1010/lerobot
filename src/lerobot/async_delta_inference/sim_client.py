@@ -338,9 +338,13 @@ class SimClient:
                 log_prefix="[CLIENT] Observation",
                 silent=True,
             )
+            send_start = time.perf_counter()
             _ = self.stub.SendObservations(observation_iterator)
+            send_time = time.perf_counter() - send_start
             obs_timestep = obs.get_timestep()
-            self.logger.debug(f"Sent observation #{obs_timestep} | ")
+            self.logger.info(
+                f"[DEBUG] SendObservations RPC completed in {send_time*1000:.2f}ms for obs #{obs_timestep}"
+            )
 
             return True
 
