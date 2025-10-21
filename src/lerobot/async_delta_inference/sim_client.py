@@ -517,7 +517,19 @@ class SimClient:
         """Reset the simulation environment."""
         obs, info = self.vec_env.reset()
         # Extract from vectorized format
-        obs = {k: v[0] for k, v in obs.items()}
+        # Handle nested dictionaries and various data types
+        def extract_first_element(data):
+            if isinstance(data, dict):
+                return {k: extract_first_element(v) for k, v in data.items()}
+            elif isinstance(data, (list, tuple)):
+                return data[0] if len(data) > 0 else data
+            elif isinstance(data, (np.ndarray, torch.Tensor)):
+                return data[0] if len(data.shape) > 0 and data.shape[0] > 0 else data
+            else:
+                # Scalar or other non-indexable types
+                return data
+        
+        obs = extract_first_element(obs)
         info = info[0] if isinstance(info, (list, tuple)) else info
         self.current_episode_reward = 0.0
         return obs, info
