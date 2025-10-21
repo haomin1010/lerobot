@@ -362,6 +362,7 @@ def create_libero_envs(
     for suite_name in suite_names:
         suite = _get_suite(suite_name)
         total = len(suite.tasks)
+        print(total)
         selected = _select_task_ids(total, task_ids_filter)
 
         if not selected:
