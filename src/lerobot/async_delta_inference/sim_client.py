@@ -74,35 +74,9 @@ from .constants import SUPPORTED_ENVS
 
 def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:
     """Convert environment configuration to lerobot features format."""
-    from lerobot.configs.types import FeatureType
-    from lerobot.utils.constants import OBS_STR
-    
-    # Build the features dictionary in the LeRobot dataset format (with dtype, shape, names)
-    features = {}
-    
-    for key, policy_ft in env_config.features.items():
-        if key == "action":
-            continue
-        
-        # Convert PolicyFeature to dataset feature format
-        if policy_ft.type == FeatureType.VISUAL:
-            # For images: dtype is "image" or "video", shape is (H, W, C)
-            lerobot_key = env_config.features_map.get(key, f"{OBS_STR}.images.{key}")
-            features[lerobot_key] = {
-                "dtype": "image",
-                "shape": policy_ft.shape,  # Already in (H, W, C) format from env config
-                "names": ["height", "width", "channels"],
-            }
-        elif policy_ft.type == FeatureType.STATE:
-            # For state: dtype is "float32", shape is (state_dim,)
-            lerobot_key = env_config.features_map.get(key, f"{OBS_STR}.state")
-            features[lerobot_key] = {
-                "dtype": "float32",
-                "shape": policy_ft.shape,
-                "names": [f"state_{i}" for i in range(policy_ft.shape[0])],
-            }
-    
-    return features
+    from dataclasses import asdict
+    # Build the features dictionary based on environment configuration
+    return {f"observation.{k}": asdict(v) for k, v in env_config.features.items() if k != "action"}
 
 
 def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObservation:
@@ -543,19 +517,7 @@ class SimClient:
         """Reset the simulation environment."""
         obs, info = self.vec_env.reset()
         # Extract from vectorized format
-        # Handle nested dictionaries and various data types
-        def extract_first_element(data):
-            if isinstance(data, dict):
-                return {k: extract_first_element(v) for k, v in data.items()}
-            elif isinstance(data, (list, tuple)):
-                return data[0] if len(data) > 0 else data
-            elif isinstance(data, (np.ndarray, torch.Tensor)):
-                return data[0] if len(data.shape) > 0 and data.shape[0] > 0 else data
-            else:
-                # Scalar or other non-indexable types
-                return data
-        
-        obs = extract_first_element(obs)
+        obs = {k: v[0] for k, v in obs.items()}
         info = info[0] if isinstance(info, (list, tuple)) else info
         self.current_episode_reward = 0.0
         return obs, info
