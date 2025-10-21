@@ -98,7 +98,7 @@ def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:
             features[lerobot_key] = {
                 "dtype": "float32",
                 "shape": policy_ft.shape,
-                "names": [f"state_{i}" for i in range(policy_ft.shape[0])],
+                "names": [key],  # Single name pointing to the state vector in raw obs
             }
 
     return features
@@ -113,7 +113,7 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     For Libero, this means:
     - 'pixels/agentview_image' -> 'agentview_image' (simple camera name)
     - 'pixels/robot0_eye_in_hand_image' -> 'robot0_eye_in_hand_image'
-    - 'agent_pos' -> individual 'agent_pos_0', 'agent_pos_1', ... keys
+    - 'agent_pos' -> 'agent_pos' (keep as vector)
     """
     raw_obs: RawObservation = {}
     
@@ -125,17 +125,14 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
                 img = torch.from_numpy(img)
             raw_obs[cam_name] = img
     
-    # Process state - expand to individual scalar keys for build_dataset_frame
+    # Process state - keep as vector
     if "agent_pos" in obs:
         state = obs["agent_pos"]
-        # Convert to numpy for easier iteration
-        if isinstance(state, torch.Tensor):
+        if isinstance(state, np.ndarray):
+            state = state  # Keep as numpy array
+        elif isinstance(state, torch.Tensor):
             state = state.cpu().numpy()
-        # Flatten in case of extra dimensions
-        state_flat = state.flatten()
-        # Create individual scalar keys: agent_pos_0, agent_pos_1, ...
-        for i, value in enumerate(state_flat):
-            raw_obs[f"agent_pos_{i}"] = float(value)
+        raw_obs["agent_pos"] = state
     
     # Add task if provided
     if task:
