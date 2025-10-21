@@ -427,11 +427,19 @@ class SimClient:
         # Wait at barrier for synchronized start
         self.start_barrier.wait()
         self.logger.info("Action receiving thread starting")
+        
+        first_request = True
 
         while self.running:
             try:
                 # Use GetActions to get actions from the server
+                if first_request:
+                    self.logger.info("[DEBUG] Action receiver: Making first GetActions request to server...")
                 actions_chunk = self.stub.GetActions(services_pb2.Empty())
+                if first_request:
+                    self.logger.info(f"[DEBUG] Action receiver: Got response, data length={len(actions_chunk.data)}")
+                    first_request = False
+                    
                 if len(actions_chunk.data) == 0:
                     continue  # received `Empty` from server, wait for next call
 
@@ -485,6 +493,11 @@ class SimClient:
                 queue_update_time = time.perf_counter() - start_time
 
                 self.must_go.set()  # after receiving actions, next empty queue triggers must-go processing!
+                
+                # Debug: Log queue size after aggregation
+                with self.action_queue_lock:
+                    final_queue_size = self.action_queue.qsize()
+                self.logger.info(f"[DEBUG] Action receiver: Added actions to queue, new queue size={final_queue_size}")
 
                 if verbose:
                     # Get queue state after changes
@@ -755,7 +768,9 @@ class SimClient:
     def control_loop(self, task: str, verbose: bool = False):
         """Combined function for executing actions and streaming observations in simulation."""
         # Wait at barrier for synchronized start
+        self.logger.info("[DEBUG] Control loop: Waiting at barrier for action receiver thread...")
         self.start_barrier.wait()
+        self.logger.info("[DEBUG] Control loop: Barrier passed, both threads synchronized")
         self.logger.info("Control loop thread starting")
 
         episode_count = 0
@@ -786,12 +801,32 @@ class SimClient:
             while not episode_done and self.running:
                 control_loop_start = time.perf_counter()
                 
+                # Debug: Log queue state at the start of each loop iteration
+                with self.action_queue_lock:
+                    queue_size = self.action_queue.qsize()
+                if step_count == 0 and queue_size == 0:
+                    self.logger.info(f"[DEBUG] Loop start: queue_size={queue_size}, ready_to_send={self._ready_to_send_observation()}")
+                
                 # (1) Send observation if ready
-                if self._ready_to_send_observation():
+                ready_to_send = self._ready_to_send_observation()
+                if step_count == 0:
+                    self.logger.info(f"[DEBUG] Ready to send observation: {ready_to_send}, queue_size={queue_size}")
+                
+                if ready_to_send:
+                    if step_count == 0:
+                        self.logger.info(f"[DEBUG] Sending observation to server...")
                     self.control_loop_observation(obs, task, verbose)
+                    if step_count == 0:
+                        self.logger.info(f"[DEBUG] Observation sent successfully")
                 
                 # (2) Perform action if available
-                if self.actions_available():
+                actions_avail = self.actions_available()
+                if step_count == 0:
+                    self.logger.info(f"[DEBUG] Actions available: {actions_avail}, queue_size={self.action_queue.qsize()}")
+                
+                if actions_avail:
+                    if step_count == 0:
+                        self.logger.info(f"[DEBUG] Executing action from queue...")
                     obs, reward, done, info = self.control_loop_action(verbose)
                     step_count += 1
                     self.current_episode_steps += 1
@@ -802,6 +837,7 @@ class SimClient:
                         'reward': f'{self.current_episode_reward:.2f}',
                         'queue': self.action_queue.qsize()
                     })
+                    self.logger.info(f"[DEBUG] Action executed, step_count={step_count}")
                     
                     # Check if episode is done
                     if done:
@@ -941,14 +977,20 @@ def async_sim_client(cfg: SimClientConfig):
         client.logger.info("Starting action receiver thread...")
 
         # Create and start action receiver thread
-        action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=True)
+        action_receiver_thread = threading.Thread(
+            target=client.receive_actions,
+            kwargs={"verbose": True},  # Enable verbose logging
+            daemon=True
+        )
 
         # Start action receiver thread
         action_receiver_thread.start()
+        client.logger.info("[DEBUG] Action receiver thread started")
 
         try:
             # The main thread runs the control loop
-            client.control_loop(task=cfg.task)
+            client.logger.info("[DEBUG] Starting control loop...")
+            client.control_loop(task=cfg.task, verbose=True)  # Enable verbose logging
 
         finally:
             client.stop()
