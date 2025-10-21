@@ -116,7 +116,7 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     raw_obs: RawObservation = {}
     print(obs)
     print("11111111111")
-    time.sleep("1111111111111")
+    time.sleep(5)
     
     # Process images
     if "pixels" in obs:
