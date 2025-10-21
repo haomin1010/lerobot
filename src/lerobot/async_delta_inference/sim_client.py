@@ -107,36 +107,39 @@ def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:
 def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObservation:
     """Format environment observation to match robot observation format.
     
-    Converts Gym environment observation format to the format expected by the policy server.
-    For Libero, this means:
-    - 'pixels/agentview_image' -> 'observation.images.image'
-    - 'pixels/robot0_eye_in_hand_image' -> 'observation.images.image2'
-    - 'agent_pos' -> 'observation.state'
+    Converts Gym environment observation format to the raw format expected by the policy server.
+    The keys should be simple names (not LeRobot-prefixed), as the conversion to LeRobot format
+    happens on the server side via make_lerobot_observation().
+    
+    For Libero:
+    - 'pixels/agentview_image' -> 'agentview_image'
+    - 'pixels/robot0_eye_in_hand_image' -> 'robot0_eye_in_hand_image'
+    - 'agent_pos' -> 'agent_pos' (or individual motor keys if mapped)
     """
     raw_obs: RawObservation = {}
     
-    # Process images
+    # Process images - use simple camera names without LeRobot prefix
     if "pixels" in obs:
         for cam_name, img in obs["pixels"].items():
-            # Map camera names using features_map from env_config
-            lerobot_key = env_config.features_map.get(f"pixels/{cam_name}", f"{OBS_IMAGES}.{cam_name}")
+            # Use simple camera name (e.g., "agentview_image" not "observation.images.agentview_image")
             # Convert numpy array to torch tensor if needed
             if isinstance(img, np.ndarray):
                 img = torch.from_numpy(img)
-            raw_obs[lerobot_key] = img
+            raw_obs[cam_name] = img
     
-    # Process state
+    # Process state - use simple key names
     if "agent_pos" in obs:
-        lerobot_key = env_config.features_map.get("agent_pos", OBS_STATE)
         state = obs["agent_pos"]
         if isinstance(state, np.ndarray):
             state = torch.from_numpy(state)
-        raw_obs[lerobot_key] = state
+        # For Libero, agent_pos is a concatenated state vector
+        # We can either use "agent_pos" directly or expand it to individual motor keys
+        # Here we use "agent_pos" which should be mapped via features_map
+        raw_obs["agent_pos"] = state
     
     # Add task if provided
     if task:
         raw_obs["task"] = task
-    time.sleep(5)
     
     return raw_obs
 
