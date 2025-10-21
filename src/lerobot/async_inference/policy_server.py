@@ -153,6 +153,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         start = time.perf_counter()
         self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
         self.policy.to(self.device)
+        self.policy.eval()  # Set policy to evaluation mode (disable dropout, etc.)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
@@ -356,6 +357,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """3. Get action chunk"""
         start_inference = time.perf_counter()
+        # Reset policy state if requested (e.g., at the start of a new episode)
+        if observation_t.reset_policy:
+            self.policy.reset()
+            self.logger.debug("Policy state reset for new episode")
+        # Ensure policy is in eval mode before inference
+        self.policy.eval()
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_inference
         self.logger.info(

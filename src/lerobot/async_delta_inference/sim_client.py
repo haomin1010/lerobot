@@ -247,6 +247,9 @@ class SimClient:
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
         
+        # Flag to signal policy reset on next observation
+        self._reset_policy_on_next_obs = True  # Reset at the start
+        
         # Episode statistics
         self.episode_rewards = []
         self.episode_successes = []
@@ -589,7 +592,7 @@ class SimClient:
         with self.action_queue_lock:
             current_queue_size = self.action_queue.qsize()
             # Request new observation when queue size drops to request_new_at
-            return self.config.max_actions_to_use - current_queue_size >= self.config.request_new_at
+            return current_queue_size <= self.config.request_new_at
 
     def control_loop_observation(self, obs: dict, task: str, verbose: bool = False) -> RawObservation:
         """Process and send observation to policy server."""
@@ -607,7 +610,12 @@ class SimClient:
                 timestamp=time.time(),  # need time.time() to compare timestamps across client and server
                 observation=raw_observation,
                 timestep=max(latest_action, 0),
+                reset_policy=self._reset_policy_on_next_obs,  # Signal to reset policy state
             )
+            
+            # Clear the flag after setting it in observation
+            if self._reset_policy_on_next_obs:
+                self._reset_policy_on_next_obs = False
 
             obs_capture_time = time.perf_counter() - start_time
 
@@ -657,9 +665,13 @@ class SimClient:
                 result[k] = v[0]
         return result
 
-    def reset_environment(self):
-        """Reset the simulation environment."""
-        obs, info = self.vec_env.reset()
+    def reset_environment(self, seed: int | None = None):
+        """Reset the simulation environment.
+        
+        Args:
+            seed: Random seed for reproducibility. If None, uses random initialization.
+        """
+        obs, info = self.vec_env.reset(seed=[seed] if seed is not None else None)
         # Extract from vectorized format (handles nested dicts)
         obs = self._extract_single_obs(obs)
         # info might be a dict or a list depending on the environment
@@ -669,7 +681,12 @@ class SimClient:
         self.current_episode_reward = 0.0
         self.current_episode_steps = 0
         
-        self.logger.debug(f"Environment reset. Max steps for this episode: {self.max_episode_steps}")
+        # Mark that we need to reset policy state for the next observation
+        self._reset_policy_on_next_obs = True
+        
+        self.logger.debug(
+            f"Environment reset (seed={seed}). Max steps for this episode: {self.max_episode_steps}"
+        )
         return obs, info
 
     def control_loop(self, task: str, verbose: bool = False):
@@ -681,12 +698,17 @@ class SimClient:
         episode_count = 0
 
         while self.running and episode_count < self.config.n_episodes:
-            # Reset environment at the start of each episode
-            obs, info = self.reset_environment()
+            # Calculate seed for this episode (if seed is provided)
+            episode_seed = self.config.seed + episode_count if self.config.seed is not None else None
+            
+            # Reset environment at the start of each episode (with deterministic seed)
+            obs, info = self.reset_environment(seed=episode_seed)
             episode_done = False
             step_count = 0
             
-            self.logger.info(f"Starting episode {episode_count + 1}/{self.config.n_episodes}")
+            self.logger.info(
+                f"Starting episode {episode_count + 1}/{self.config.n_episodes} (seed={episode_seed})"
+            )
             
             # Episode loop: run until episode is done
             while not episode_done and self.running:

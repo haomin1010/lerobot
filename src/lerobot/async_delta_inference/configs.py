@@ -102,6 +102,9 @@ class SimClientConfig:
 
     # Evaluation configuration
     n_episodes: int = field(default=10, metadata={"help": "Number of episodes to evaluate"})
+    
+    # Seed for reproducibility (if None, uses random initialization)
+    seed: int | None = field(default=1000, metadata={"help": "Random seed for reproducibility"})
 
     # Debug configuration
     debug_visualize_queue_size: bool = field(
@@ -176,6 +179,7 @@ class SimClientConfig:
             "actions_per_chunk": self.actions_per_chunk,
             "task": self.task,
             "n_episodes": self.n_episodes,
+            "seed": self.seed,
             "max_actions_to_use": self.max_actions_to_use,
             "request_new_at": self.request_new_at,
             "replace_actions_on_new": self.replace_actions_on_new,

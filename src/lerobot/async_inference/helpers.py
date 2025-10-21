@@ -228,6 +228,7 @@ class TimedAction(TimedData):
 class TimedObservation(TimedData):
     observation: RawObservation
     must_go: bool = False
+    reset_policy: bool = False  # Signal to reset policy state (for new episode)
 
     def get_observation(self):
         return self.observation
