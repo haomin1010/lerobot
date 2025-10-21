@@ -556,7 +556,7 @@ class SimClient:
 
     def reset_environment(self):
         """Reset the simulation environment."""
-        obs, info = self.vec_env.reset()
+        obs, info = self.vec_env.reset(seed=self.config.seed)
         # Extract from vectorized format - handle nested pixels dict
         unwrapped_obs = {}
         for k, v in obs.items():
