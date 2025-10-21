@@ -89,7 +89,6 @@ def raw_observation_to_observation(
     lerobot_features: dict[str, dict],
     policy_image_features: dict[str, PolicyFeature],
 ) -> Observation:
-    print("a111111a")
     observation = {}
 
     observation = prepare_raw_observation(raw_observation, lerobot_features, policy_image_features)
@@ -100,7 +99,6 @@ def raw_observation_to_observation(
                 observation[k] = prepare_image(v).unsqueeze(0)
         else:
             observation[k] = v
-    print("a111111b")
     return observation
 
 
