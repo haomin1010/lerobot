@@ -247,25 +247,25 @@ class LiberoEnv(EnvConfig):
         default_factory=lambda: {
             ACTION: ACTION,
             "agent_pos": OBS_STATE,
-            "pixels/agentview_image": f"{OBS_IMAGES}.agentview_image",
-            "pixels/robot0_eye_in_hand_image": f"{OBS_IMAGES}.robot0_eye_in_hand_image",
+            "pixels/image": f"{OBS_IMAGES}.image",
+            "pixels/image2": f"{OBS_IMAGES}.image2",
         }
     )
 
     def __post_init__(self):
         if self.obs_type == "pixels":
-            self.features["pixels/agentview_image"] = PolicyFeature(
+            self.features["pixels/image"] = PolicyFeature(
                 type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
             )
-            self.features["pixels/robot0_eye_in_hand_image"] = PolicyFeature(
+            self.features["pixels/image2"] = PolicyFeature(
                 type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
             )
         elif self.obs_type == "pixels_agent_pos":
             self.features["agent_pos"] = PolicyFeature(type=FeatureType.STATE, shape=(8,))
-            self.features["pixels/agentview_image"] = PolicyFeature(
+            self.features["pixels/image"] = PolicyFeature(
                 type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
             )
-            self.features["pixels/robot0_eye_in_hand_image"] = PolicyFeature(
+            self.features["pixels/image2"] = PolicyFeature(
                 type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
             )
         else:
