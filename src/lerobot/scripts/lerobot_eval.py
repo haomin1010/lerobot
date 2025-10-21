@@ -172,6 +172,17 @@ def rollout(
             logging.info(f"=" * 80)
             logging.info(f"[DEBUG] lerobot_eval.rollout - Step {step} 模型输入前调试信息")
             logging.info(f"-" * 80)
+            
+            # 打印 task 信息
+            if "task" in observation:
+                task_value = observation["task"]
+                if isinstance(task_value, list):
+                    logging.info(f"Task (list): {task_value}")
+                    if len(task_value) > 0:
+                        logging.info(f"Task[0]: '{task_value[0]}', 长度: {len(task_value[0])} 字符")
+                else:
+                    logging.info(f"Task: '{task_value}', 长度: {len(str(task_value))} 字符")
+            
             logging.info(f"观测字典包含的键: {list(observation.keys())}")
             
             for key, value in observation.items():

@@ -368,6 +368,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.logger.info(f"[DEBUG] 观测 #{observation_t.get_timestep()} - 模型输入前调试信息")
         self.logger.info(f"-" * 80)
         
+        # 打印 task 信息（在 tokenize 之前的原始 task）
+        raw_obs = observation_t.get_observation()
+        if "task" in raw_obs:
+            self.logger.info(f"原始 task 字符串: '{raw_obs['task']}'")
+            self.logger.info(f"原始 task 长度: {len(raw_obs['task'])} 字符")
+        
         # 打印观测字典的键
         self.logger.info(f"观测字典包含的键: {list(observation.keys())}")
         
