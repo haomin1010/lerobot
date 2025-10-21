@@ -130,25 +130,38 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     - 'agent_pos' array -> individual 'state_0', 'state_1', ... keys
     """
     from lerobot.configs.types import FeatureType
+    import logging
+    logger = logging.getLogger(__name__)
     
     raw_obs: RawObservation = {}
+    
+    # Debug: log what we receive from environment
+    if "pixels" in obs:
+        logger.info(f"[DEBUG _format_env_observation] Pixels keys from env: {list(obs['pixels'].keys())}")
     
     # Process images - use keys WITHOUT "observation.images." prefix
     # because build_dataset_frame will add it
     if "pixels" in obs:
         for cam_name, img in obs["pixels"].items():
+            logger.info(f"[DEBUG _format_env_observation] Processing camera: {cam_name}")
             # Map camera names using features_map from env_config
             full_key = env_config.features_map.get(f"pixels/{cam_name}", f"{OBS_IMAGES}.{cam_name}")
+            logger.info(f"[DEBUG _format_env_observation] pixels/{cam_name} -> full_key: {full_key}")
+            
             # Remove "observation.images." prefix for build_dataset_frame
             if full_key.startswith("observation.images."):
                 clean_key = full_key.replace("observation.images.", "")
             else:
                 clean_key = full_key
             
+            logger.info(f"[DEBUG _format_env_observation] final clean_key: {clean_key}")
+            
             # Convert numpy array to torch tensor if needed
             if isinstance(img, np.ndarray):
                 img = torch.from_numpy(img)
             raw_obs[clean_key] = img
+    
+    logger.info(f"[DEBUG _format_env_observation] Final raw_obs keys: {list(raw_obs.keys())}")
     
     # Process state - expand array into individual keys
     if "agent_pos" in obs:
