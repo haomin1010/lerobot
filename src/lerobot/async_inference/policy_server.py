@@ -233,7 +233,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
             start_time = time.perf_counter()
 
+            print("1111111111111111111111a")
             action_chunk = self._predict_action_chunk(obs)
+            print("1111111111111111111111b")
             inference_time = time.perf_counter() - start_time
 
             start_time = time.perf_counter()
