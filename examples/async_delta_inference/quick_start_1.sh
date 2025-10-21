@@ -89,7 +89,7 @@ echo ""
 python -m lerobot.async_delta_inference.sim_client \
     --env.type=$ENV_TYPE \
     --env.task=$ENV_TASK \
-    --env.task_ids=[3]
+    --env.task_ids=[3] \
     --policy_type=$POLICY_TYPE \
     --pretrained_name_or_path=$MODEL_PATH \
     --policy_device=$DEVICE \

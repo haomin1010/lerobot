@@ -424,7 +424,14 @@ class SimClient:
                     )
 
             except grpc.RpcError as e:
-                self.logger.error(f"Error receiving actions: {e}")
+                # Check if it's a normal shutdown (channel closed)
+                if e.code() == grpc.StatusCode.CANCELLED or not self.running:
+                    self.logger.debug("Action receiver shutting down (channel closed)")
+                    break
+                else:
+                    self.logger.error(f"Error receiving actions: {e}")
+        
+        self.logger.info("Action receiving thread stopped")
 
     def actions_available(self):
         """Check if there are actions available in the queue"""
@@ -686,8 +693,14 @@ def async_sim_client(cfg: SimClientConfig):
             client.control_loop(task=cfg.task)
 
         finally:
+            client.logger.info("Shutting down client...")
             client.stop()
-            action_receiver_thread.join()
+            
+            # Wait for action receiver thread to finish (with timeout)
+            action_receiver_thread.join(timeout=2.0)
+            if action_receiver_thread.is_alive():
+                client.logger.warning("Action receiver thread did not stop gracefully")
+            
             if cfg.debug_visualize_queue_size:
                 visualize_action_queue_size(client.action_queue_size)
             client.logger.info("Client stopped")
