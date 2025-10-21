@@ -238,6 +238,7 @@ class LiberoEnv(EnvConfig):
     camera_name_mapping: dict[str, str] | None = None
     observation_height: int = 256
     observation_width: int = 256
+    task_ids: list[int] | None = None  # Task IDs to create, None means [1] (first task only)
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
             ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(7,)),
@@ -291,7 +292,7 @@ class LiberoEnv(EnvConfig):
         return {
             "obs_type": self.obs_type,
             "render_mode": self.render_mode,
-            "task_ids": [1],  # Only create the first task (avoid creating all 10 tasks in the suite)
+            "task_ids": self.task_ids if self.task_ids is not None else [1],  # Default to [1] if not specified
             "observation_height": self.observation_height,
             "observation_width": self.observation_width,
         }

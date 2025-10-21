@@ -465,7 +465,7 @@ class SimClient:
             else:
                 unwrapped_obs[k] = v[0]
         obs = unwrapped_obs
-        reward = reward[0]
+        reward = float(reward[0])  # Convert numpy scalar to Python float
         info = info[0] if isinstance(info, (list, tuple)) else info
         
         # Track episode reward
