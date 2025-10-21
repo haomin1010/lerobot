@@ -125,28 +125,20 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     
     Converts Gym environment observation format to the format expected by build_dataset_frame.
     For Libero, this means:
-    - 'pixels/agentview_image' -> 'image' (build_dataset_frame will add prefix)
-    - 'pixels/robot0_eye_in_hand_image' -> 'image2'
+    - 'pixels/image' -> 'image' (build_dataset_frame will add prefix)
+    - 'pixels/image2' -> 'image2'
     - 'agent_pos' array -> individual 'state_0', 'state_1', ... keys
     """
     from lerobot.configs.types import FeatureType
-    import logging
-    logger = logging.getLogger(__name__)
     
     raw_obs: RawObservation = {}
-    
-    # Debug: log what we receive from environment
-    if "pixels" in obs:
-        logger.info(f"[DEBUG _format_env_observation] Pixels keys from env: {list(obs['pixels'].keys())}")
     
     # Process images - use keys WITHOUT "observation.images." prefix
     # because build_dataset_frame will add it
     if "pixels" in obs:
         for cam_name, img in obs["pixels"].items():
-            logger.info(f"[DEBUG _format_env_observation] Processing camera: {cam_name}")
             # Map camera names using features_map from env_config
             full_key = env_config.features_map.get(f"pixels/{cam_name}", f"{OBS_IMAGES}.{cam_name}")
-            logger.info(f"[DEBUG _format_env_observation] pixels/{cam_name} -> full_key: {full_key}")
             
             # Remove "observation.images." prefix for build_dataset_frame
             if full_key.startswith("observation.images."):
@@ -154,14 +146,10 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
             else:
                 clean_key = full_key
             
-            logger.info(f"[DEBUG _format_env_observation] final clean_key: {clean_key}")
-            
             # Convert numpy array to torch tensor if needed
             if isinstance(img, np.ndarray):
                 img = torch.from_numpy(img)
             raw_obs[clean_key] = img
-    
-    logger.info(f"[DEBUG _format_env_observation] Final raw_obs keys: {list(raw_obs.keys())}")
     
     # Process state - expand array into individual keys
     if "agent_pos" in obs:
@@ -351,13 +339,9 @@ class SimClient:
                 log_prefix="[CLIENT] Observation",
                 silent=True,
             )
-            send_start = time.perf_counter()
             _ = self.stub.SendObservations(observation_iterator)
-            send_time = time.perf_counter() - send_start
             obs_timestep = obs.get_timestep()
-            self.logger.info(
-                f"[DEBUG] SendObservations RPC completed in {send_time*1000:.2f}ms for obs #{obs_timestep}"
-            )
+            self.logger.debug(f"Sent observation #{obs_timestep}")
 
             return True
 
@@ -444,19 +428,11 @@ class SimClient:
         # Wait at barrier for synchronized start
         self.start_barrier.wait()
         self.logger.info("Action receiving thread starting")
-        
-        first_request = True
 
         while self.running:
             try:
                 # Use GetActions to get actions from the server
-                if first_request:
-                    self.logger.info("[DEBUG] Action receiver: Making first GetActions request to server...")
                 actions_chunk = self.stub.GetActions(services_pb2.Empty())
-                if first_request:
-                    self.logger.info(f"[DEBUG] Action receiver: Got response, data length={len(actions_chunk.data)}")
-                    first_request = False
-                    
                 if len(actions_chunk.data) == 0:
                     continue  # received `Empty` from server, wait for next call
 
@@ -510,11 +486,6 @@ class SimClient:
                 queue_update_time = time.perf_counter() - start_time
 
                 self.must_go.set()  # after receiving actions, next empty queue triggers must-go processing!
-                
-                # Debug: Log queue size after aggregation
-                with self.action_queue_lock:
-                    final_queue_size = self.action_queue.qsize()
-                self.logger.info(f"[DEBUG] Action receiver: Added actions to queue, new queue size={final_queue_size}")
 
                 if verbose:
                     # Get queue state after changes
@@ -713,11 +684,6 @@ class SimClient:
                 observation.must_go = self.must_go.is_set() and self.action_queue.empty()
                 current_queue_size = self.action_queue.qsize()
 
-            self.logger.info(
-                f"[DEBUG] Sending obs: must_go_flag={self.must_go.is_set()}, "
-                f"queue_empty={self.action_queue.empty()}, must_go={observation.must_go}"
-            )
-
             _ = self.send_observation(observation)
 
             self.logger.debug(f"QUEUE SIZE: {current_queue_size} (Must go: {observation.must_go})")
@@ -794,9 +760,7 @@ class SimClient:
     def control_loop(self, task: str, verbose: bool = False):
         """Combined function for executing actions and streaming observations in simulation."""
         # Wait at barrier for synchronized start
-        self.logger.info("[DEBUG] Control loop: Waiting at barrier for action receiver thread...")
         self.start_barrier.wait()
-        self.logger.info("[DEBUG] Control loop: Barrier passed, both threads synchronized")
         self.logger.info("Control loop thread starting")
 
         episode_count = 0
@@ -827,32 +791,12 @@ class SimClient:
             while not episode_done and self.running:
                 control_loop_start = time.perf_counter()
                 
-                # Debug: Log queue state at the start of each loop iteration
-                with self.action_queue_lock:
-                    queue_size = self.action_queue.qsize()
-                if step_count == 0 and queue_size == 0:
-                    self.logger.info(f"[DEBUG] Loop start: queue_size={queue_size}, ready_to_send={self._ready_to_send_observation()}")
-                
                 # (1) Send observation if ready
-                ready_to_send = self._ready_to_send_observation()
-                if step_count == 0:
-                    self.logger.info(f"[DEBUG] Ready to send observation: {ready_to_send}, queue_size={queue_size}")
-                
-                if ready_to_send:
-                    if step_count == 0:
-                        self.logger.info(f"[DEBUG] Sending observation to server...")
+                if self._ready_to_send_observation():
                     self.control_loop_observation(obs, task, verbose)
-                    if step_count == 0:
-                        self.logger.info(f"[DEBUG] Observation sent successfully")
                 
                 # (2) Perform action if available
-                actions_avail = self.actions_available()
-                if step_count == 0:
-                    self.logger.info(f"[DEBUG] Actions available: {actions_avail}, queue_size={self.action_queue.qsize()}")
-                
-                if actions_avail:
-                    if step_count == 0:
-                        self.logger.info(f"[DEBUG] Executing action from queue...")
+                if self.actions_available():
                     obs, reward, done, info = self.control_loop_action(verbose)
                     step_count += 1
                     self.current_episode_steps += 1
@@ -863,7 +807,6 @@ class SimClient:
                         'reward': f'{self.current_episode_reward:.2f}',
                         'queue': self.action_queue.qsize()
                     })
-                    self.logger.info(f"[DEBUG] Action executed, step_count={step_count}")
                     
                     # Check if episode is done
                     if done:
@@ -1005,18 +948,15 @@ def async_sim_client(cfg: SimClientConfig):
         # Create and start action receiver thread
         action_receiver_thread = threading.Thread(
             target=client.receive_actions,
-            kwargs={"verbose": True},  # Enable verbose logging
             daemon=True
         )
 
         # Start action receiver thread
         action_receiver_thread.start()
-        client.logger.info("[DEBUG] Action receiver thread started")
 
         try:
             # The main thread runs the control loop
-            client.logger.info("[DEBUG] Starting control loop...")
-            client.control_loop(task=cfg.task, verbose=True)  # Enable verbose logging
+            client.control_loop(task=cfg.task)
 
         finally:
             client.stop()
