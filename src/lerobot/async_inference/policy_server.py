@@ -362,6 +362,41 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.logger.debug("Policy state reset for new episode")
         # Ensure policy is in eval mode before inference
         self.policy.eval()
+        
+        # ========== 调试信息：模型输入前 ==========
+        self.logger.info(f"=" * 80)
+        self.logger.info(f"[DEBUG] 观测 #{observation_t.get_timestep()} - 模型输入前调试信息")
+        self.logger.info(f"-" * 80)
+        
+        # 打印观测字典的键
+        self.logger.info(f"观测字典包含的键: {list(observation.keys())}")
+        
+        # 打印每个观测项的详细信息
+        for key, value in observation.items():
+            if isinstance(value, torch.Tensor):
+                self.logger.info(
+                    f"  {key}:\n"
+                    f"    - shape: {value.shape}\n"
+                    f"    - dtype: {value.dtype}\n"
+                    f"    - device: {value.device}\n"
+                    f"    - min: {value.min().item():.6f}\n"
+                    f"    - max: {value.max().item():.6f}\n"
+                    f"    - mean: {value.mean().item():.6f}\n"
+                    f"    - std: {value.std().item():.6f}"
+                )
+                # 如果是图像，打印前几个像素值
+                if "image" in key.lower() or "camera" in key.lower():
+                    flat_values = value.flatten()[:10]
+                    self.logger.info(f"    - 前10个像素值: {flat_values.tolist()}")
+                # 如果是状态或动作，打印完整值
+                elif "state" in key.lower() or "action" in key.lower() or value.numel() <= 20:
+                    self.logger.info(f"    - 值: {value.flatten().tolist()}")
+            else:
+                self.logger.info(f"  {key}: {value} (type: {type(value).__name__})")
+        
+        self.logger.info(f"=" * 80)
+        # ========== 调试信息结束 ==========
+        
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_inference
         self.logger.info(

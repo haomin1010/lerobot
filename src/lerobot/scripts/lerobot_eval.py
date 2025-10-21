@@ -166,6 +166,37 @@ def rollout(
         # TODO: works with SyncVectorEnv but not AsyncVectorEnv
         observation = add_envs_task(env, observation)
         observation = preprocessor(observation)
+        
+        # ========== 调试信息：lerobot_eval 模型输入前 ==========
+        if step == 0:  # 只在第一步打印，避免日志过多
+            logging.info(f"=" * 80)
+            logging.info(f"[DEBUG] lerobot_eval.rollout - Step {step} 模型输入前调试信息")
+            logging.info(f"-" * 80)
+            logging.info(f"观测字典包含的键: {list(observation.keys())}")
+            
+            for key, value in observation.items():
+                if isinstance(value, torch.Tensor):
+                    logging.info(
+                        f"  {key}:\n"
+                        f"    - shape: {value.shape}\n"
+                        f"    - dtype: {value.dtype}\n"
+                        f"    - device: {value.device}\n"
+                        f"    - min: {value.min().item():.6f}\n"
+                        f"    - max: {value.max().item():.6f}\n"
+                        f"    - mean: {value.mean().item():.6f}\n"
+                        f"    - std: {value.std().item():.6f}"
+                    )
+                    if "image" in key.lower() or "camera" in key.lower():
+                        flat_values = value.flatten()[:10]
+                        logging.info(f"    - 前10个像素值: {flat_values.tolist()}")
+                    elif "state" in key.lower() or "action" in key.lower() or value.numel() <= 20:
+                        logging.info(f"    - 值: {value.flatten().tolist()}")
+                else:
+                    logging.info(f"  {key}: {value} (type: {type(value).__name__})")
+            
+            logging.info(f"=" * 80)
+        # ========== 调试信息结束 ==========
+        
         with torch.inference_mode():
             action = policy.select_action(observation)
         action = postprocessor(action)

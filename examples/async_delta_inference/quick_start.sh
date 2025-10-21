@@ -63,47 +63,22 @@ mkdir -p logs
 
 # 启动 PolicyServer
 echo "3. 启动 PolicyServer..."
-
 python -m lerobot.async_inference.policy_server \
     --host=$HOST \
     --port=$PORT \
     --fps=$FPS \
     --inference_latency=0.033 \
-    --obs_queue_timeout=2 &
+    --obs_queue_timeout=2 \
+    > logs/policy_server.log 2>&1 &
 
 SERVER_PID=$!
 echo "✅ PolicyServer 已启动 (PID: $SERVER_PID)"
+echo "   日志: logs/policy_server.log"
 echo ""
 
-# 等待服务器启动并检查
+# 等待服务器启动
 echo "4. 等待服务器就绪..."
 sleep 3
-
-# 检查服务器是否正常运行
-if ! ps -p $SERVER_PID > /dev/null 2>&1; then
-    echo "❌ PolicyServer 启动失败！"
-    echo "查看日志目录: ls -lth logs/"
-    ls -lth logs/
-    echo ""
-    echo "最新日志内容:"
-    LOG_FILE=$(ls -t logs/policy_server_*.log 2>/dev/null | head -1)
-    if [ -n "$LOG_FILE" ]; then
-        cat "$LOG_FILE"
-    fi
-    exit 1
-fi
-
-# 查找实际的日志文件（带时间戳）
-sleep 1
-LOG_FILE=$(ls -t logs/policy_server_*.log 2>/dev/null | head -1)
-if [ -n "$LOG_FILE" ]; then
-    echo "✅ 服务器日志文件: $LOG_FILE"
-    echo "最新日志:"
-    tail -10 "$LOG_FILE"
-else
-    echo "⚠️  警告: 未找到服务器日志文件"
-fi
-echo ""
 
 # 定义清理函数
 cleanup() {

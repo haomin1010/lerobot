@@ -284,6 +284,35 @@ class SmolVLAPolicy(PreTrainedPolicy):
         batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
+        # ========== 调试信息：SmolVLA 模型内部 ==========
+        import logging
+        logger = logging.getLogger("smolvla_debug")
+        logger.setLevel(logging.INFO)
+        
+        logger.info(f"=" * 80)
+        logger.info(f"[DEBUG] SmolVLA.predict_action_chunk - 模型内部调试信息")
+        logger.info(f"-" * 80)
+        logger.info(f"batch 包含的键: {list(batch.keys())}")
+        
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                logger.info(
+                    f"  {key}:\n"
+                    f"    - shape: {value.shape}\n"
+                    f"    - dtype: {value.dtype}\n"
+                    f"    - device: {value.device}\n"
+                    f"    - min: {value.min().item():.6f}\n"
+                    f"    - max: {value.max().item():.6f}\n"
+                    f"    - mean: {value.mean().item():.6f}"
+                )
+                if value.numel() <= 50:
+                    logger.info(f"    - 值: {value.flatten()[:50].tolist()}")
+            else:
+                logger.info(f"  {key}: {type(value).__name__}")
+        
+        logger.info(f"=" * 80)
+        # ========== 调试信息结束 ==========
+
         actions = self._get_action_chunk(batch, noise)
         return actions
 
