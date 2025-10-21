@@ -327,8 +327,7 @@ def create_libero_envs(
     env_cls: Callable[[Sequence[Callable[[], Any]]], Any] | None = None,
 ) -> dict[str, dict[int, Any]]:
 
-    print("1111111111111111111111111")
-    time.sleep(50)
+
     """
     Create vectorized LIBERO environments with a consistent return shape.
 
@@ -368,6 +367,9 @@ def create_libero_envs(
         if not selected:
             raise ValueError(f"No tasks selected for suite '{suite_name}' (available: {total}).")
 
+        print("1111111111111111111111111")
+        print(selected)
+        time.sleep(50)
         for tid in selected:
             fns = _make_env_fns(
                 suite=suite,
