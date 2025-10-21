@@ -154,6 +154,9 @@ def prepare_raw_observation(
     image_keys = list(filter(is_image_key, lerobot_obs))
     # state's shape is expected as (B, state_dim)
     state_dict = {OBS_STATE: extract_state_from_raw_observation(lerobot_obs)}
+    image_dict = {
+        image_k: extract_images_from_raw_observation(lerobot_obs, image_k) for image_k in image_keys
+    }
 
     # Turns the image features to (C, H, W) with H, W matching the policy image features.
     # This reduces the resolution of the images
@@ -168,13 +171,14 @@ def prepare_raw_observation(
     return {**state_dict, **image_dict}
 
 
-def get_logger(name: str, log_to_file: bool = True) -> logging.Logger:
+def get_logger(name: str, log_to_file: bool = True, console_level: str = "INFO") -> logging.Logger:
     """
     Get a logger using the standardized logging setup from utils.py.
 
     Args:
         name: Logger name (e.g., 'policy_server', 'robot_client')
         log_to_file: Whether to also log to a file
+        console_level: Console logging level (DEBUG, INFO, WARNING, ERROR)
 
     Returns:
         Configured logger instance
@@ -187,7 +191,7 @@ def get_logger(name: str, log_to_file: bool = True) -> logging.Logger:
         log_file = None
 
     # Initialize the standardized logging
-    init_logging(log_file=log_file, display_pid=False)
+    init_logging(log_file=log_file, display_pid=False, console_level=console_level)
 
     # Return a named logger
     return logging.getLogger(name)
@@ -225,7 +229,6 @@ class TimedAction(TimedData):
 class TimedObservation(TimedData):
     observation: RawObservation
     must_go: bool = False
-    reset_policy: bool = False  # Signal to reset policy state (for new episode)
 
     def get_observation(self):
         return self.observation
