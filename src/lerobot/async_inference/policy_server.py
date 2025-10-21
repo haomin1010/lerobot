@@ -219,31 +219,25 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         chunk, containing multiple actions."""
         client_id = context.peer()
         self.logger.debug(f"Client {client_id} connected for action streaming")
-        print("1111111111111111111111aaaa")
+
         # Generate action based on the most recent observation and its timestep
         try:
-            print("1111111111111111111111aa")
             getactions_starts = time.perf_counter()
             obs = self.observation_queue.get(timeout=self.config.obs_queue_timeout)
-            print("1111111111111111111111ab")
             self.logger.info(
                 f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
             )
-            print("1111111111111111111111ac")
+
             with self._predicted_timesteps_lock:
                 self._predicted_timesteps.add(obs.get_timestep())
 
             start_time = time.perf_counter()
-
-            print("1111111111111111111111a")
             action_chunk = self._predict_action_chunk(obs)
-            print("1111111111111111111111b")
             inference_time = time.perf_counter() - start_time
 
             start_time = time.perf_counter()
             actions_bytes = pickle.dumps(action_chunk)  # nosec
             serialize_time = time.perf_counter() - start_time
-
 
             # Create and return the action chunk
             actions = services_pb2.Actions(data=actions_bytes)
@@ -346,10 +340,6 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         5. Convert to TimedAction list
         """
         """1. Prepare observation"""
-        print("1111111a")
-        print(observation_t.get_observation())
-        print("11111111")
-        time.sleep(1)
         start_prepare = time.perf_counter()
         observation: Observation = raw_observation_to_observation(
             observation_t.get_observation(),
@@ -358,16 +348,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         )
         prepare_time = time.perf_counter() - start_prepare
 
-        print("1111111b")
-        time.sleep(1)
         """2. Apply preprocessor"""
         start_preprocess = time.perf_counter()
         observation = self.preprocessor(observation)
         self.last_processed_obs: TimedObservation = observation_t
         preprocessing_time = time.perf_counter() - start_preprocess
 
-        print("1111111c")
-        time.sleep(1)
         """3. Get action chunk"""
         start_inference = time.perf_counter()
         # Reset policy state if requested (e.g., at the start of a new episode)
@@ -376,62 +362,6 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.logger.debug("Policy state reset for new episode")
         # Ensure policy is in eval mode before inference
         self.policy.eval()
-
-        print("1111111d")
-        time.sleep(1)
-        # ========== 调试信息：模型输入前 ==========
-        self.logger.info(f"=" * 80)
-        self.logger.info(f"[DEBUG] 观测 #{observation_t.get_timestep()} - 模型输入前调试信息")
-        self.logger.info(f"-" * 80)
-        
-        # 打印 task 信息（在 tokenize 之前的原始 task）
-        raw_obs = observation_t.get_observation()
-        if "task" in raw_obs:
-            self.logger.info(f"原始 task 字符串: '{raw_obs['task']}'")
-            self.logger.info(f"原始 task 长度: {len(raw_obs['task'])} 字符")
-        
-        # 打印观测字典的键
-        self.logger.info(f"观测字典包含的键: {list(observation.keys())}")
-        
-        # 打印每个观测项的详细信息
-        for key, value in observation.items():
-            if isinstance(value, torch.Tensor):
-                info_str = (
-                    f"  {key}:\n"
-                    f"    - shape: {value.shape}\n"
-                    f"    - dtype: {value.dtype}\n"
-                    f"    - device: {value.device}\n"
-                )
-                
-                # 只对浮点类型计算统计信息
-                if value.dtype in [torch.float16, torch.float32, torch.float64]:
-                    info_str += (
-                        f"    - min: {value.min().item():.6f}\n"
-                        f"    - max: {value.max().item():.6f}\n"
-                        f"    - mean: {value.mean().item():.6f}\n"
-                        f"    - std: {value.std().item():.6f}"
-                    )
-                else:
-                    # 对整数类型只显示 min/max
-                    info_str += (
-                        f"    - min: {value.min().item()}\n"
-                        f"    - max: {value.max().item()}"
-                    )
-                
-                self.logger.info(info_str)
-                
-                # 如果是图像，打印前几个像素值
-                if "image" in key.lower() or "camera" in key.lower():
-                    flat_values = value.flatten()[:10]
-                    self.logger.info(f"    - 前10个像素值: {flat_values.tolist()}")
-                # 如果是状态或动作，打印完整值
-                elif "state" in key.lower() or "action" in key.lower() or value.numel() <= 20:
-                    self.logger.info(f"    - 值: {value.flatten().tolist()}")
-            else:
-                self.logger.info(f"  {key}: {value} (type: {type(value).__name__})")
-        
-        self.logger.info(f"=" * 80)
-        # ========== 调试信息结束 ==========
         
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_inference
