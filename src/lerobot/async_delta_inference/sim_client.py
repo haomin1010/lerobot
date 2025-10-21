@@ -541,8 +541,6 @@ class SimClient:
     def reset_environment(self):
         """Reset the simulation environment."""
         obs, info = self.vec_env.reset()
-        # Extract from vectorized format
-        obs = {k: v[0] for k, v in obs.items()}
         info = info[0] if isinstance(info, (list, tuple)) else info
         self.current_episode_reward = 0.0
         return obs, info
