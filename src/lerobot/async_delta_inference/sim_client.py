@@ -77,16 +77,30 @@ def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:
     from lerobot.utils.constants import OBS_STR
 
     # Build the features dictionary in the LeRobot dataset format (with dtype, shape, names)
+    # This maps raw observation keys to their LeRobot dataset feature specs
     features = {}
 
     for key, policy_ft in env_config.features.items():
         if key == "action":
             continue
 
+        # Get the LeRobot key from features_map, or construct default
+        if key in env_config.features_map:
+            lerobot_key = env_config.features_map[key]
+        elif policy_ft.type == FeatureType.VISUAL:
+            # For images without explicit mapping: observation.images.<simple_name>
+            # Extract simple name (e.g., "pixels/agentview_image" -> "agentview_image")
+            simple_name = key.split("/")[-1] if "/" in key else key
+            lerobot_key = f"{OBS_STR}.images.{simple_name}"
+        elif policy_ft.type == FeatureType.STATE:
+            # For state without explicit mapping
+            lerobot_key = f"{OBS_STR}.state"
+        else:
+            continue
+
         # Convert PolicyFeature to dataset feature format
         if policy_ft.type == FeatureType.VISUAL:
-            # For images: dtype is "image" or "video", shape is (H, W, C)
-            lerobot_key = env_config.features_map.get(key, f"{OBS_STR}.images.{key}")
+            # For images: dtype is "image", shape is (H, W, C)
             features[lerobot_key] = {
                 "dtype": "image",
                 "shape": policy_ft.shape,  # Already in (H, W, C) format from env config
@@ -94,11 +108,14 @@ def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:
             }
         elif policy_ft.type == FeatureType.STATE:
             # For state: dtype is "float32", shape is (state_dim,)
-            lerobot_key = env_config.features_map.get(key, f"{OBS_STR}.state")
+            # build_dataset_frame expects individual scalar keys in the raw observation
+            # So we need to create names for each dimension
+            raw_key = key.split("/")[-1] if "/" in key else key
+            state_dim = policy_ft.shape[0]
             features[lerobot_key] = {
                 "dtype": "float32",
                 "shape": policy_ft.shape,
-                "names": [f"state_{i}" for i in range(policy_ft.shape[0])],
+                "names": [f"{raw_key}_{i}" for i in range(state_dim)],
             }
 
     return features
@@ -114,7 +131,7 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
     For Libero:
     - 'pixels/agentview_image' -> 'agentview_image'
     - 'pixels/robot0_eye_in_hand_image' -> 'robot0_eye_in_hand_image'
-    - 'agent_pos' -> 'agent_pos' (or individual motor keys if mapped)
+    - 'agent_pos' -> 'agent_pos_0', 'agent_pos_1', ... (expanded to scalar keys)
     """
     raw_obs: RawObservation = {}
     
@@ -127,15 +144,21 @@ def _format_env_observation(obs: dict, env_config, task: str = "") -> RawObserva
                 img = torch.from_numpy(img)
             raw_obs[cam_name] = img
     
-    # Process state - use simple key names
+    # Process state - expand vector to individual scalar keys
+    # build_dataset_frame expects each state dimension as a separate key
     if "agent_pos" in obs:
         state = obs["agent_pos"]
         if isinstance(state, np.ndarray):
-            state = torch.from_numpy(state)
-        # For Libero, agent_pos is a concatenated state vector
-        # We can either use "agent_pos" directly or expand it to individual motor keys
-        # Here we use "agent_pos" which should be mapped via features_map
-        raw_obs["agent_pos"] = state
+            # Expand state vector: agent_pos[0] -> "agent_pos_0", etc.
+            for i, value in enumerate(state):
+                raw_obs[f"agent_pos_{i}"] = float(value)
+        elif isinstance(state, torch.Tensor):
+            # Expand tensor state vector
+            for i in range(state.shape[0]):
+                raw_obs[f"agent_pos_{i}"] = float(state[i].item())
+        else:
+            # Single scalar value
+            raw_obs["agent_pos_0"] = float(state)
     
     # Add task if provided
     if task:
