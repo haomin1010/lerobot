@@ -68,7 +68,7 @@ python -m lerobot.async_inference.policy_server \
     --port=$PORT \
     --fps=$FPS \
     --inference_latency=0.033 \
-    --obs_queue_timeout=2 
+    --obs_queue_timeout=2
 
 SERVER_PID=$!
 echo "✅ PolicyServer 已启动 (PID: $SERVER_PID)"

@@ -347,6 +347,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """
         """1. Prepare observation"""
         print("1111111a")
+        print(observation_t.get_observation())
+        print("11111111")
         time.sleep(1)
         start_prepare = time.perf_counter()
         observation: Observation = raw_observation_to_observation(
