@@ -29,6 +29,7 @@ from gymnasium import spaces
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 from robosuite.utils.transform_utils import quat2axisangle
+import time
 
 
 def _parse_camera_names(camera_name: str | Sequence[str]) -> list[str]:
@@ -325,6 +326,9 @@ def create_libero_envs(
     init_states: bool = True,
     env_cls: Callable[[Sequence[Callable[[], Any]]], Any] | None = None,
 ) -> dict[str, dict[int, Any]]:
+
+    print("1111111111111111111111111")
+    time.sleep(50)
     """
     Create vectorized LIBERO environments with a consistent return shape.
 

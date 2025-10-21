@@ -100,6 +100,9 @@ trap cleanup EXIT INT TERM
 echo "5. 启动 SimClient 进行评估..."
 echo "============================================"
 echo ""
+echo "⚠️  重要提示: 如果 task 为空，模型无法理解要执行什么任务！"
+echo "   请确保环境能够提供任务描述。"
+echo ""
 
 python -m lerobot.async_delta_inference.sim_client \
     --env.type=$ENV_TYPE \
