@@ -232,12 +232,19 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 self._predicted_timesteps.add(obs.get_timestep())
 
             start_time = time.perf_counter()
+            self.logger.info(
+                "1111111111111111111a"
+            )
             action_chunk = self._predict_action_chunk(obs)
             inference_time = time.perf_counter() - start_time
 
             start_time = time.perf_counter()
             actions_bytes = pickle.dumps(action_chunk)  # nosec
             serialize_time = time.perf_counter() - start_time
+
+            self.logger.info(
+                "1111111111111111111b"
+            )
 
             # Create and return the action chunk
             actions = services_pb2.Actions(data=actions_bytes)
