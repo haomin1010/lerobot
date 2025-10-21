@@ -83,7 +83,7 @@ class SimClientConfig:
     
     # Request new actions every N steps (None to disable periodic requests)
     request_new_every_n_steps: int | None = field(
-        default=None,
+        default=10,
         metadata={"help": "Request new actions every N steps (None to disable, triggers regardless of queue size)"}
     )
 
