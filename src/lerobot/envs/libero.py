@@ -198,6 +198,8 @@ class LiberoEnv(gym.Env):
         task = task_suite.get_task(task_id)
         self.task = task.name
         self.task_description = task.language
+        print(self.task_description)
+        time.sleep(10)
         task_bddl_file = os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file)
 
         env_args = {
@@ -362,7 +364,6 @@ def create_libero_envs(
     for suite_name in suite_names:
         suite = _get_suite(suite_name)
         total = len(suite.tasks)
-        print(total)
         selected = _select_task_ids(total, task_ids_filter)
 
         if not selected:
@@ -370,7 +371,8 @@ def create_libero_envs(
 
         print("1111111111111111111111111")
         print(selected)
-        time.sleep(50)
+        time.sleep(5)
+
         for tid in selected:
             fns = _make_env_fns(
                 suite=suite,

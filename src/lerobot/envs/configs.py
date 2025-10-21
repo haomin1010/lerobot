@@ -276,7 +276,7 @@ class LiberoEnv(EnvConfig):
         return {
             "obs_type": self.obs_type,
             "render_mode": self.render_mode,
-            "task_ids": [0],  # Only create the first task (avoid creating all 10 tasks in the suite)
+            "task_ids": [1],  # Only create the first task (avoid creating all 10 tasks in the suite)
             "observation_height": self.observation_height,
             "observation_width": self.observation_width,
         }
