@@ -220,6 +220,8 @@ class SimClient:
         self.episode_successes = []
         self.current_episode_reward = 0.0
 
+        self.latest_timestep = 0
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -416,6 +418,8 @@ class SimClient:
                         f"Deserialization time: {deserialize_time * 1000:.2f}ms"
                     )
 
+                    self.latest_timestep = incoming_timesteps[-1]
+
                 # Update action queue
                 start_time = time.perf_counter()
                 self._aggregate_action_queues(timed_actions, self.config.aggregate_fn)
@@ -580,6 +584,7 @@ class SimClient:
     def reset_environment(self):
         """Reset the simulation environment."""
         obs, info = self.vec_env.reset()
+        self.latest_timestep = 0
         # Extract from vectorized format - handle nested pixels dict
         unwrapped_obs = {}
         for k, v in obs.items():
@@ -613,12 +618,6 @@ class SimClient:
         
         return obs, info
 
-    def _get_last_action_timestep(self) -> int:
-        """Get the timestep of the last action in the queue"""
-        with self.action_queue_lock:
-            if self.action_queue.qsize() > 0:
-                return list(self.action_queue.queue)[-1].get_timestep()
-            return -1
 
     def control_loop(self, task: str, verbose: bool = False):
         """Combined function for executing actions and streaming observations in simulation."""
@@ -647,11 +646,9 @@ class SimClient:
             )
             print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            now_action_timestep = self._get_last_action_timestep()
-            if now_action_timestep > last_send_action_timestep and (periodic_request_needed or self.action_queue.qsize() <= 0):
-                print(periodic_request_needed)
+            if self.latest_timestep > last_send_action_timestep and (periodic_request_needed or self.action_queue.qsize() <= 0):
                 self.control_loop_observation(obs, task, verbose)
-                last_send_action_timestep = now_action_timestep
+                last_send_action_timestep = self.latest_timestep
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
                     self.logger.debug(
