@@ -656,12 +656,12 @@ class SimClient:
                 steps_since_last_request += 1  # Increment counter for periodic requests
                 
                 # Create progress bar for first step of episode
-                if pbar is None:
-                    pbar = tqdm(
-                        total=max_steps,
-                        desc=f"Episode {episode_count + 1}/{self.config.n_episodes}",
-                        unit="step"
-                    )
+                # if pbar is None:
+                #     pbar = tqdm(
+                #         total=max_steps,
+                #         desc=f"Episode {episode_count + 1}/{self.config.n_episodes}",
+                #         unit="step"
+                #     )
                 
                 # Update progress bar
                 pbar.update(1)
