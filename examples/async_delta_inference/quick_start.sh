@@ -22,19 +22,10 @@
 set -e  # 遇到错误时退出
 
 echo "============================================"
-echo "Async Delta Inference - 快速启动"
+echo "Async Delta Inference Server- 快速启动"
 echo "============================================"
 echo ""
 
-# 检查是否安装了 Libero
-echo "1. 检查依赖..."
-if ! python -c "import libero" 2>/dev/null; then
-    echo "❌ Libero 未安装"
-    echo "请运行: pip install -e \".[libero]\""
-    exit 1
-fi
-echo "✅ Libero 已安装"
-echo ""
 
 # 配置参数
 HOST=${HOST:-"127.0.0.1"}
@@ -48,7 +39,7 @@ DEVICE=${DEVICE:-"cuda"}
 N_EPISODES=${N_EPISODES:-"5"}
 ACTIONS_PER_CHUNK=${ACTIONS_PER_CHUNK:-"50"}
 
-echo "2. 配置信息:"
+echo "配置信息:"
 echo "   服务器地址: $HOST:$PORT"
 echo "   环境类型: $ENV_TYPE"
 echo "   任务: $ENV_TASK"
@@ -61,8 +52,20 @@ echo ""
 # 创建日志目录
 mkdir -p logs
 
+cleanup() {
+    echo ""
+    echo "============================================"
+    echo "正在清理..."
+    echo "============================================"
+    if [ ! -z "$SERVER_PID" ]; then
+        echo "停止 PolicyServer (PID: $SERVER_PID)..."
+        kill $SERVER_PID 2>/dev/null || true
+    fi
+    echo "清理完成"
+}
+
 # 启动 PolicyServer
-echo "3. 启动 PolicyServer..."
+echo "启动 PolicyServer..."
 python -m lerobot.async_inference.policy_server \
     --host=$HOST \
     --port=$PORT \
@@ -75,7 +78,4 @@ echo "✅ PolicyServer 已启动 (PID: $SERVER_PID)"
 echo "   日志: logs/policy_server.log"
 echo ""
 
-# 等待服务器启动
-echo "4. 等待服务器就绪..."
-sleep 3
 
