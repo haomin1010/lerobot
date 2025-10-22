@@ -246,7 +246,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         return self.parameters()
 
     def _get_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache=False,
-                         past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None) -> Tensor | tuple:
+                         past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None,
+                         action_context: Tensor | None = None) -> Tensor | tuple:
         # TODO: Check if this for loop is needed.
         # Context: In fact, self.queues contains only ACTION field, and in inference, we don't have action in the batch
         # In the case of offline inference, we have the action in the batch
@@ -264,7 +265,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         result = self.model.sample_actions(
             images, img_masks, lang_tokens, lang_masks, state, noise=noise,
             cal_cache=cal_cache, past_key_values=past_key_values, prefix_pad_masks=prefix_pad_masks,
-            initial_x_t=initial_x_t, initial_time=initial_time
+            initial_x_t=initial_x_t, initial_time=initial_time, action_context=action_context
         )
         
         # If cal_cache=True, result is (past_key_values, prefix_pad_masks)
@@ -291,7 +292,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache: bool = False,
-                           past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None) -> Tensor | tuple:
+                           past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None,
+                           action_context: Tensor | None = None) -> Tensor | tuple:
         self.eval()
 
         batch = self._prepare_batch(batch)
@@ -300,7 +302,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         result = self._get_action_chunk(
             batch, noise, cal_cache=cal_cache,
             past_key_values=past_key_values, prefix_pad_masks=prefix_pad_masks,
-            initial_x_t=initial_x_t, initial_time=initial_time
+            initial_x_t=initial_x_t, initial_time=initial_time, action_context=action_context
         )
         return result
 
@@ -356,6 +358,53 @@ class SmolVLAPolicy(PreTrainedPolicy):
         loss = losses.mean()
         # For backward pass
         loss_dict["loss"] = loss.item()
+        return loss, loss_dict
+
+    def forward_delta_expert(self, batch: dict[str, Tensor], noise=None, time=None) -> dict[str, Tensor]:
+        """Training forward pass for delta_expert.
+        
+        This method trains the delta_expert network and learnable noise to generate delta actions.
+        You can customize this method according to your training objectives.
+        
+        Args:
+            batch: Batch of data containing observations and actions
+            noise: Optional noise tensor
+            time: Optional time tensor
+            
+        Returns:
+            loss: Training loss
+            loss_dict: Dictionary containing detailed loss information
+        """
+        if self.config.adapt_to_pi_aloha:
+            batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
+            batch[ACTION] = self._pi_aloha_encode_actions_inv(batch[ACTION])
+
+        images, img_masks = self.prepare_images(batch)
+        state = self.prepare_state(batch)
+        lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"]
+        lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        actions = self.prepare_action(batch)
+        actions_is_pad = batch.get("actions_id_pad")
+        loss_dict = {}
+        
+        # Forward pass for delta_expert
+        losses = self.model.forward_delta_expert(
+            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
+        )
+        loss_dict["delta_losses_after_forward"] = losses.clone()
+
+        if actions_is_pad is not None:
+            in_episode_bound = ~actions_is_pad
+            losses = losses * in_episode_bound.unsqueeze(-1)
+            loss_dict["delta_losses_after_in_ep_bound"] = losses.clone()
+
+        # Remove padding
+        losses = losses[:, :, : self.config.max_action_dim]
+        loss_dict["delta_losses_after_rm_padding"] = losses.clone()
+
+        # For backward pass
+        loss = losses.mean()
+        loss_dict["delta_loss"] = loss.item()
         return loss, loss_dict
 
     def prepare_images(self, batch):
@@ -514,6 +563,25 @@ class VLAFlowMatching(nn.Module):
         )
         self.action_time_mlp_out = nn.Linear(
             self.vlm_with_expert.expert_hidden_size, self.vlm_with_expert.expert_hidden_size
+        )
+
+        # Delta expert layers
+        self.delta_action_in_proj = nn.Linear(self.config.max_action_dim, self.vlm_with_expert.expert_hidden_size)
+        self.delta_action_out_proj = nn.Linear(self.vlm_with_expert.expert_hidden_size, self.config.max_action_dim)
+        self.delta_action_time_mlp_in = nn.Linear(
+            self.vlm_with_expert.expert_hidden_size * 2, self.vlm_with_expert.expert_hidden_size
+        )
+        self.delta_action_time_mlp_out = nn.Linear(
+            self.vlm_with_expert.expert_hidden_size, self.vlm_with_expert.expert_hidden_size
+        )
+        
+        # Action context encoder: encodes a sequence of actions (e.g., next 5 actions from queue)
+        # Input: (batch_size, num_context_actions, max_action_dim)
+        # Output: (batch_size, chunk_size, max_action_dim) - expanded to match chunk_size
+        self.action_context_encoder = nn.Sequential(
+            nn.Linear(self.config.max_action_dim, self.vlm_with_expert.expert_hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.vlm_with_expert.expert_hidden_size, self.config.max_action_dim)
         )
 
         self.set_requires_grad()
@@ -722,9 +790,77 @@ class VLAFlowMatching(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
+    def forward_delta_expert(
+        self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
+    ) -> Tensor:
+        """Training forward pass for delta_expert.
+        
+        This computes the loss for training delta_expert and learnable_noise.
+        The delta_expert learns to generate delta actions from the learnable noise.
+        
+        Args:
+            images: Input images
+            img_masks: Image masks
+            lang_tokens: Language tokens
+            lang_masks: Language masks
+            state: Robot state
+            actions: Ground truth actions (target for delta actions)
+            noise: Optional noise (if None, uses learnable_noise)
+            time: Optional time (if None, uses fixed timestep)
+            
+        Returns:
+            losses: Per-element losses (batch_size x chunk_size x action_dim)
+        """
+        bsize = state.shape[0]
+        device = state.device
+        
+        # Compute prefix embeddings and KV cache
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        
+        # Compute image and language key value cache
+        _, past_key_values = self.vlm_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+            fill_kv_cache=True,
+        )
+        
+        # Use action context if provided, otherwise use zero tensor or noise
+        if noise is None:
+            # Use zero tensor as default input for delta_expert training
+            x_t = torch.zeros(bsize, self.config.chunk_size, self.config.max_action_dim, device=device)
+        else:
+            if time is None:
+                time = self.sample_time(bsize, device)
+            time_expanded = time[:, None, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+        
+        # Fixed timestep for delta expert
+        timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
+        
+        # Apply one denoising step using delta_expert
+        v_t = self.denoise_step_delta(
+            prefix_pad_masks,
+            past_key_values,
+            x_t,
+            timestep,
+        )
+        
+        # Compute loss against ground truth actions
+        # You can customize this loss function based on your objectives
+        losses = F.mse_loss(actions, v_t, reduction="none")
+        
+        return losses
+
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, 
                       cal_cache=False, past_key_values=None, prefix_pad_masks=None, 
-                      initial_x_t=None, initial_time=None) -> Tensor | tuple:
+                      initial_x_t=None, initial_time=None, action_context=None) -> Tensor | tuple:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
         
         Args:
@@ -734,14 +870,16 @@ class VLAFlowMatching(nn.Module):
             lang_masks: Language masks
             state: State inputs
             noise: Optional noise tensor
-            cal_cache: If True, returns (past_key_values, prefix_pad_masks) after computing KV cache
+            cal_cache: If True, returns (past_key_values, prefix_pad_masks, delta_actions) after computing KV cache
             past_key_values: Cached KV values for continuing from intermediate state
             prefix_pad_masks: Cached prefix padding masks
             initial_x_t: Initial x_t for continuing denoising
             initial_time: Initial time value for continuing denoising
+            action_context: Action context from queue (batch_size, num_actions, action_dim)
+                          Used to generate delta_actions when cal_cache=True
             
         Returns:
-            If cal_cache=True: tuple of (past_key_values, prefix_pad_masks)
+            If cal_cache=True: tuple of (past_key_values, prefix_pad_masks, delta_actions)
             If continuing from cached state (past_key_values is not None): final actions (x_t)
             Otherwise: final actions (x_t)
         """
@@ -770,8 +908,11 @@ class VLAFlowMatching(nn.Module):
                 fill_kv_cache=True,
             )
 
-            # If cal_cache, return past_key_values and prefix_pad_masks only
+            # If cal_cache, generate delta_actions and return cache
             if cal_cache:
+                delta_actions = self.generate_delta_actions(
+                    prefix_pad_masks, past_key_values, bsize, device, action_context
+                )
                 return past_key_values, prefix_pad_masks, delta_actions
 
         dt = -1.0 / self.config.num_steps
@@ -827,4 +968,161 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
+        return v_t
+
+    def embed_suffix_delta(self, noisy_actions, timestep):
+        """Embed suffix for delta expert (similar to embed_suffix but uses delta projections)."""
+        embs = []
+        pad_masks = []
+        att_masks = []
+
+        # Fuse timestep + action information using delta MLP
+        action_emb = self.delta_action_in_proj(noisy_actions)
+        device = action_emb.device
+        bsize = action_emb.shape[0]
+        dtype = action_emb.dtype
+        # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
+        time_emb = create_sinusoidal_pos_embedding(
+            timestep,
+            self.vlm_with_expert.expert_hidden_size,
+            self.config.min_period,
+            self.config.max_period,
+            device=device,
+        )
+        time_emb = time_emb.type(dtype=dtype)
+
+        time_emb = time_emb[:, None, :].expand_as(action_emb)
+        action_time_emb = torch.cat([action_emb, time_emb], dim=2)
+
+        action_time_emb = self.delta_action_time_mlp_in(action_time_emb)
+        action_time_emb = F.silu(action_time_emb)  # swish == silu
+        action_time_emb = self.delta_action_time_mlp_out(action_time_emb)
+
+        # Add to input tokens
+        embs.append(action_time_emb)
+
+        bsize, action_time_dim = action_time_emb.shape[:2]
+        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
+        pad_masks.append(action_time_mask)
+
+        # Set attention masks so that image, language and state inputs do not attend to action tokens
+        att_masks += [1] * self.config.chunk_size
+        embs = torch.cat(embs, dim=1)
+        pad_masks = torch.cat(pad_masks, dim=1)
+        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
+        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+        return embs, pad_masks, att_masks
+
+    def denoise_step_delta(
+        self,
+        prefix_pad_masks,
+        past_key_values,
+        x_t,
+        timestep,
+    ):
+        """Apply one denoising step using delta_expert."""
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix_delta(x_t, timestep)
+
+        suffix_len = suffix_pad_masks.shape[1]
+        batch_size = prefix_pad_masks.shape[0]
+        prefix_len = prefix_pad_masks.shape[1]
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+
+        outputs_embeds, _ = self.vlm_with_expert.forward_delta(
+            attention_mask=full_att_2d_masks,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=[None, suffix_embs],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=False,
+        )
+        suffix_out = outputs_embeds[1]
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        suffix_out = suffix_out.to(dtype=torch.float32)
+        v_t = self.delta_action_out_proj(suffix_out)
+        return v_t
+
+    def encode_action_context(self, action_context: torch.Tensor) -> torch.Tensor:
+        """Encode action context (e.g., next 5 actions from queue) to delta_expert input.
+        
+        Args:
+            action_context: Action context tensor (batch_size, num_context_actions, action_dim)
+            
+        Returns:
+            Encoded action context (batch_size, chunk_size, max_action_dim)
+        """
+        batch_size = action_context.shape[0]
+        num_context_actions = action_context.shape[1]
+        
+        # Encode each action in the context
+        # (batch_size, num_context_actions, action_dim) -> (batch_size, num_context_actions, action_dim)
+        encoded_actions = self.action_context_encoder(action_context)
+        
+        # Expand to chunk_size by repeating and interpolating
+        if num_context_actions < self.config.chunk_size:
+            # Repeat to match chunk_size (simple strategy: repeat last action)
+            repeat_times = (self.config.chunk_size + num_context_actions - 1) // num_context_actions
+            expanded = encoded_actions.repeat(1, repeat_times, 1)[:, :self.config.chunk_size, :]
+        elif num_context_actions > self.config.chunk_size:
+            # Downsample if we have too many actions
+            # Use linear interpolation
+            expanded = torch.nn.functional.interpolate(
+                encoded_actions.transpose(1, 2),  # (B, action_dim, num_context_actions)
+                size=self.config.chunk_size,
+                mode='linear',
+                align_corners=False
+            ).transpose(1, 2)  # (B, chunk_size, action_dim)
+        else:
+            expanded = encoded_actions
+        
+        return expanded
+
+    def generate_delta_actions(
+        self,
+        prefix_pad_masks,
+        past_key_values,
+        batch_size,
+        device,
+        action_context: torch.Tensor = None,
+    ):
+        """Generate delta actions using delta_expert with action context.
+        
+        Args:
+            prefix_pad_masks: Padding masks from prefix
+            past_key_values: Cached KV values
+            batch_size: Batch size
+            device: Device to use
+            action_context: Action context from queue (batch_size, num_actions, action_dim)
+                          If None, uses zero tensor as fallback
+            
+        Returns:
+            delta_actions: Generated delta actions
+        """
+        # Encode action context or use zero tensor as fallback
+        if action_context is not None:
+            x_t = self.encode_action_context(action_context)
+        else:
+            # Fallback: use zero tensor
+            x_t = torch.zeros(
+                batch_size, self.config.chunk_size, self.config.max_action_dim,
+                dtype=torch.float32, device=device
+            )
+        
+        # Fixed timestep for delta expert (you can make this configurable)
+        timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(batch_size)
+        
+        # Apply one denoising step using delta_expert
+        v_t = self.denoise_step_delta(
+            prefix_pad_masks,
+            past_key_values,
+            x_t,
+            timestep,
+        )
+        
         return v_t

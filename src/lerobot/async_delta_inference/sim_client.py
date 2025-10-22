@@ -584,6 +584,31 @@ class SimClient:
         with self.action_queue_lock:
             return self.action_queue.qsize() / self.action_chunk_size <= self._chunk_size_threshold
 
+    def _get_next_n_actions_from_queue(self, n: int = 5) -> list[np.ndarray] | None:
+        """Get the next N actions from the queue without removing them.
+        
+        Args:
+            n: Number of actions to retrieve (default: 5)
+            
+        Returns:
+            List of action arrays, or None if queue doesn't have enough actions
+        """
+        with self.action_queue_lock:
+            if self.action_queue.qsize() < n:
+                return None
+            
+            # Get first n actions without removing them
+            actions = []
+            for i, timed_action in enumerate(self.action_queue.queue):
+                if i >= n:
+                    break
+                action_tensor = timed_action.get_action()
+                # Convert to numpy array
+                action_array = action_tensor.cpu().numpy() if isinstance(action_tensor, torch.Tensor) else action_tensor
+                actions.append(action_array)
+            
+            return actions if len(actions) == n else None
+
     def control_loop_observation(self, obs: dict, task: str, periodic_request_needed: bool, verbose: bool = False) -> RawObservation:
         """Process and send observation to policy server."""
         try:
@@ -598,6 +623,14 @@ class SimClient:
 
             timestep = max(latest_action + 1, 0)
             reset_policy = True if timestep <= 0 else False
+
+            # Get next N actions from queue as context for delta_expert
+            action_context = self._get_next_n_actions_from_queue(n=5)
+            if action_context is not None:
+                # Add action context to raw observation
+                raw_observation["action_context"] = np.array(action_context)  # Shape: (5, action_dim)
+                if verbose:
+                    self.logger.debug(f"Added action context with {len(action_context)} actions to observation")
 
             observation = TimedObservation(
                 timestamp=time.time(),  # need time.time() to compare timestamps across client and server

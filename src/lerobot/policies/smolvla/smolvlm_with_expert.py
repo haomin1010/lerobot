@@ -102,6 +102,9 @@ class SmolVLMWithExpertModel(nn.Module):
             )
             lm_expert_config.num_hidden_layers = num_expert_layers
         self.lm_expert = AutoModel.from_config(lm_expert_config)
+        
+        # Delta expert with the same architecture as lm_expert
+        self.delta_expert = AutoModel.from_config(lm_expert_config)
 
         self.num_expert_layers = len(self.lm_expert.layers)
         self.self_attn_every_n_layers = self_attn_every_n_layers
@@ -120,8 +123,23 @@ class SmolVLMWithExpertModel(nn.Module):
                     lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
                     bias=lm_expert_config.attention_bias,
                 )
+            # Apply the same to delta_expert
+            for layer_idx in range(len(self.delta_expert.layers)):
+                if self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0:
+                    continue
+                self.delta_expert.layers[layer_idx].self_attn.k_proj = nn.Linear(
+                    config.text_config.num_key_value_heads * config.text_config.head_dim,
+                    lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
+                    bias=lm_expert_config.attention_bias,
+                )
+                self.delta_expert.layers[layer_idx].self_attn.v_proj = nn.Linear(
+                    config.text_config.num_key_value_heads * config.text_config.head_dim,
+                    lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
+                    bias=lm_expert_config.attention_bias,
+                )
         # Remove unused embed_tokens
         self.lm_expert.embed_tokens = None
+        self.delta_expert.embed_tokens = None
 
         self.num_attention_heads = self.config.text_config.num_attention_heads
         self.num_key_value_heads = self.config.text_config.num_key_value_heads
@@ -399,6 +417,104 @@ class SmolVLMWithExpertModel(nn.Module):
             vlm_layers.append(models[0].layers[i])
             expert_layers.append(expert_layer)
         return [vlm_layers, expert_layers]
+
+    def forward_delta(
+        self,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        inputs_embeds: list[torch.FloatTensor] = None,
+        use_cache: bool | None = None,
+        fill_kv_cache: bool | None = None,
+    ):
+        """Forward pass using delta_expert instead of lm_expert."""
+        models = [self.get_vlm_model().text_model, self.delta_expert]
+        model_layers = self.get_model_layers(models)
+        for hidden_states in inputs_embeds:
+            # TODO this is very inefficient
+            # dtype is always the same, batch size too (if > 1 len)
+            # device could be trickier in multi gpu edge cases but that's it
+            if hidden_states is None:
+                continue
+            batch_size = hidden_states.shape[0]
+
+        # RMSNorm
+        num_layers = self.num_vlm_layers
+        head_dim = self.vlm.config.text_config.head_dim
+        for layer_idx in range(num_layers):
+            if (
+                fill_kv_cache
+                or "cross" not in self.attention_mode
+                or (self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0)
+            ):
+                att_outputs, past_key_values = self.forward_attn_layer(
+                    model_layers,
+                    inputs_embeds,
+                    layer_idx,
+                    position_ids,
+                    attention_mask,
+                    batch_size,
+                    head_dim,
+                    use_cache=use_cache,
+                    fill_kv_cache=fill_kv_cache,
+                    past_key_values=past_key_values,
+                )
+            else:
+                att_outputs, past_key_values = self.forward_cross_attn_layer(
+                    model_layers,
+                    inputs_embeds,
+                    layer_idx,
+                    position_ids,
+                    attention_mask,
+                    batch_size,
+                    head_dim,
+                    use_cache=use_cache,
+                    fill_kv_cache=fill_kv_cache,
+                    past_key_values=past_key_values,
+                )
+            outputs_embeds = []
+            start = 0
+            for i, hidden_states in enumerate(inputs_embeds):
+                layer = model_layers[i][layer_idx]
+                att_output = (
+                    att_outputs[i] if i < len(att_outputs) else att_outputs[0]
+                )  # in case of self_attn
+                if hidden_states is not None:
+                    if layer is None:
+                        outputs_embeds.append(hidden_states)
+                        continue
+                    end = start + hidden_states.shape[1]
+
+                    if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
+                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+                    att_out = att_output[:, start:end]
+                    out_emb = layer.self_attn.o_proj(att_out)
+
+                    out_emb += hidden_states
+                    after_first_residual = out_emb.clone()
+
+                    out_emb = layer.post_attention_layernorm(out_emb)
+                    out_emb = layer.mlp(out_emb)
+
+                    out_emb += after_first_residual
+
+                    outputs_embeds.append(out_emb)
+
+                    start = end if len(att_outputs) == 1 else 0
+                else:
+                    outputs_embeds.append(None)
+
+            inputs_embeds = outputs_embeds
+
+        # final norm
+        outputs_embeds = []
+        for i, hidden_states in enumerate(inputs_embeds):
+            if hidden_states is not None:
+                out_emb = models[i].norm(hidden_states)
+                outputs_embeds.append(out_emb)
+            else:
+                outputs_embeds.append(None)
+        return outputs_embeds, past_key_values
 
     def forward(
         self,

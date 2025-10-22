@@ -328,11 +328,22 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             start_time = time.perf_counter()
             
             # 1. Prepare observation
+            raw_obs = observation_t.get_observation()
             observation: Observation = raw_observation_to_observation(
-                observation_t.get_observation(),
+                raw_obs,
                 self.lerobot_features,
                 self.policy_image_features,
             )
+            
+            # Extract action_context if present in raw observation
+            action_context = None
+            if "action_context" in raw_obs:
+                action_context_np = raw_obs["action_context"]
+                # Convert to torch tensor: (num_actions, action_dim) -> (1, num_actions, action_dim)
+                action_context = torch.from_numpy(action_context_np).unsqueeze(0).float()
+                # Move to policy device
+                action_context = action_context.to(self.device)
+                self.logger.debug(f"Extracted action_context with shape: {action_context.shape}")
             
             # 2. Apply preprocessor
             observation = self.preprocessor(observation)
@@ -342,10 +353,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 self.policy.reset()
                 self.logger.debug("Policy state reset for new episode (precompute)")
             
-            # 4. Get past_key_values and prefix_pad_masks by calling predict_action_chunk with cal_cache=True
+            # 4. Get past_key_values, prefix_pad_masks and delta_actions by calling predict_action_chunk with cal_cache=True
             self.policy.eval()
-            past_key_values, prefix_pad_masks, delta_actions = self.policy.predict_action_chunk(observation, cal_cache=True)
-
+            past_key_values, prefix_pad_masks, delta_actions = self.policy.predict_action_chunk(
+                observation, cal_cache=True, action_context=action_context
+            )
+            
+            # 5. Use delta_actions as the action output
             action_tensor = delta_actions
             
             if action_tensor.ndim != 3:
