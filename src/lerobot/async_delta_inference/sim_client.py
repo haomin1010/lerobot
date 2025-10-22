@@ -522,7 +522,7 @@ class SimClient:
         with self.action_queue_lock:
             return self.action_queue.qsize() / self.action_chunk_size <= self._chunk_size_threshold
 
-    def control_loop_observation(self, obs: dict, task: str, verbose: bool = False) -> RawObservation:
+    def control_loop_observation(self, obs: dict, task: str, periodic_request_needed: bool, verbose: bool = False) -> RawObservation:
         """Process and send observation to policy server."""
         try:
             # Get serialized observation bytes from the function
@@ -548,7 +548,10 @@ class SimClient:
 
             # If there are no actions left in the queue, the observation must go through processing!
             with self.action_queue_lock:
-                observation.must_go = self.must_go.is_set() and self.action_queue.empty()
+                if periodic_request_needed:
+                    observation.must_go = True
+                else:
+                    observation.must_go = self.must_go.is_set() and self.action_queue.empty()
                 current_queue_size = self.action_queue.qsize()
 
             _ = self.send_observation(observation)
@@ -644,7 +647,7 @@ class SimClient:
             # (1) Send observation if ready (based on queue size or periodic trigger)
             if periodic_request_needed or self.action_queue.qsize() <= 0:
                 print("-----------send obs ---------------")
-                self.control_loop_observation(obs, task, verbose)
+                self.control_loop_observation(obs, task, periodic_request_needed, verbose)
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
                     self.logger.debug(
