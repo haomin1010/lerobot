@@ -380,7 +380,7 @@ class SimClient:
                 actions_chunk = self.stub.GetActions(services_pb2.Empty())
                 if len(actions_chunk.data) == 0:
                     continue  # received `Empty` from server, wait for next call
-
+                print("------------receive data-------------")
                 receive_time = time.time()
 
                 # Deserialize bytes back into list[TimedAction]
@@ -642,8 +642,8 @@ class SimClient:
             )
             print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if first_send or (periodic_request_needed or self.action_queue.qsize() <= 0):
-                first_send = False
+            if periodic_request_needed or self.action_queue.qsize() <= 0:
+                print("-----------send obs ---------------")
                 self.control_loop_observation(obs, task, verbose)
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
@@ -654,7 +654,6 @@ class SimClient:
             # (2) Perform action if available
             if self.actions_available():
                 obs, reward, done, info = self.control_loop_action(verbose)
-                allow_send = True
                 step_count += 1
                 steps_since_last_request += 1  # Increment counter for periodic requests
                 
