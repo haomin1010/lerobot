@@ -640,7 +640,7 @@ class SimClient:
             )
             print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if allow_send and (periodic_request_needed or self.action_queue.qsize() < self.config.request_new_every_n_steps):
+            if allow_send and (periodic_request_needed or self.action_queue.qsize() <= 0):
                 print(periodic_request_needed)
                 self.control_loop_observation(obs, task, verbose)
                 allow_send = False
