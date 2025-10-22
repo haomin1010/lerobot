@@ -235,6 +235,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         self.model = VLAFlowMatching(config)
         self.reset()
+        
+        # Apply parameter freezing based on config
+        if self.config.train_delta_expert:
+            self._freeze_for_delta_expert_training()
 
 
     def reset(self):
@@ -243,8 +247,44 @@ class SmolVLAPolicy(PreTrainedPolicy):
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
 
+    def _freeze_for_delta_expert_training(self):
+        """Freeze all parameters except delta_expert and its related projections."""
+        # Freeze all parameters first
+        for param in self.parameters():
+            param.requires_grad = False
+        
+        # Unfreeze delta_expert related parameters
+        delta_expert_modules = [
+            self.model.vlm_with_expert.delta_expert,
+            self.model.delta_action_in_proj,
+            self.model.delta_action_out_proj,
+            self.model.delta_action_time_mlp_in,
+            self.model.delta_action_time_mlp_out,
+            self.model.action_context_encoder,
+        ]
+        
+        for module in delta_expert_modules:
+            for param in module.parameters():
+                param.requires_grad = True
+        
+        print("✓ Froze all parameters except delta_expert and its projections")
+
+    def _unfreeze_all_parameters(self):
+        """Unfreeze all trainable parameters (for normal training)."""
+        for param in self.parameters():
+            param.requires_grad = True
+        print("✓ Unfroze all parameters for normal training")
+
     def get_optim_params(self) -> dict:
-        return self.parameters()
+        """Return only trainable parameters."""
+        if self.config.train_delta_expert:
+            # Return only delta_expert related parameters
+            trainable_params = [p for p in self.parameters() if p.requires_grad]
+            print(f"✓ Returning {len(trainable_params)} trainable parameters for delta_expert training")
+            return trainable_params
+        else:
+            # Return all parameters (normal training)
+            return self.parameters()
 
     def _get_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache=False,
                          past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None,
@@ -331,7 +371,21 @@ class SmolVLAPolicy(PreTrainedPolicy):
         return self._queues[ACTION].popleft()
 
     def forward(self, batch: dict[str, Tensor], noise=None, time=None) -> dict[str, Tensor]:
-        """Do a full training forward pass to compute the loss"""
+        """Do a full training forward pass to compute the loss.
+        
+        根据 config.train_delta_expert 参数选择训练模式：
+        - train_delta_expert=True: 只训练 delta_expert
+        - train_delta_expert=False: 正常训练主模型
+        """
+        if self.config.train_delta_expert:
+            # 训练 delta_expert 模式
+            return self.forward_delta_expert(batch, noise, time)
+        else:
+            # 正常训练模式
+            return self._forward_main_model(batch, noise, time)
+    
+    def _forward_main_model(self, batch: dict[str, Tensor], noise=None, time=None) -> dict[str, Tensor]:
+        """Normal forward pass for main model training."""
         if self.config.adapt_to_pi_aloha:
             batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
             batch[ACTION] = self._pi_aloha_encode_actions_inv(batch[ACTION])
@@ -831,16 +885,29 @@ class VLAFlowMatching(nn.Module):
             use_cache=True,
             fill_kv_cache=True,
         )
-        
-        # Use action context if provided, otherwise use zero tensor or noise
+        dt = -1.0 / self.config.num_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+        initial_time_val = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        # Otherwise continue with full denoising
         if noise is None:
             # Use zero tensor as default input for delta_expert training
             x_t = torch.zeros(bsize, self.config.chunk_size, self.config.max_action_dim, device=device)
         else:
-            if time is None:
-                time = self.sample_time(bsize, device)
-            time_expanded = time[:, None, None]
-            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            x_t = noise
+        time = initial_time_val
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            v_t = self.denoise_step(
+                prefix_pad_masks,
+                past_key_values,
+                x_t,
+                expanded_time,
+            )
+            # Euler step
+            x_t += dt * v_t
+            time += dt
+
         
         # Fixed timestep for delta expert
         timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
@@ -855,7 +922,7 @@ class VLAFlowMatching(nn.Module):
         
         # Compute loss against ground truth actions
         # You can customize this loss function based on your objectives
-        losses = F.mse_loss(actions, v_t, reduction="none")
+        losses = F.mse_loss(actions-x_t, v_t, reduction="none")
         
         return losses
 

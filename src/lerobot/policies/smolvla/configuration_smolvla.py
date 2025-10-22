@@ -71,6 +71,9 @@ class SmolVLAConfig(PreTrainedConfig):
     freeze_vision_encoder: bool = True
     train_expert_only: bool = True
     train_state_proj: bool = True
+    
+    # Delta expert training settings
+    train_delta_expert: bool = False  # If True, only train delta_expert and its projections
 
     # Training presets
     optimizer_lr: float = 1e-4
