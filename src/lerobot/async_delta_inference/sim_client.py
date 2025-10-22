@@ -629,7 +629,6 @@ class SimClient:
         pbar = None
 
         while self.running and episode_count < self.config.n_episodes:
-            print("111")
             control_loop_start = time.perf_counter()
             
             # Check if we should request new actions based on periodic trigger
@@ -639,7 +638,7 @@ class SimClient:
             )
             
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if periodic_request_needed:
+            if periodic_request_needed or self.action_queue.qsize() < self.config.request_new_every_n_steps:
                 self.control_loop_observation(obs, task, verbose)
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
@@ -647,7 +646,6 @@ class SimClient:
                         f"Periodic action request triggered (every {self.config.request_new_every_n_steps} steps)"
                     )
 
-            print("222")
             # (2) Perform action if available
             if self.actions_available():
                 obs, reward, done, info = self.control_loop_action(verbose)
