@@ -341,8 +341,25 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 action_context_np = raw_obs["action_context"]
                 # Convert to torch tensor: (num_actions, action_dim) -> (1, num_actions, action_dim)
                 action_context = torch.from_numpy(action_context_np).unsqueeze(0).float()
-                # Move to policy device
+                # Move to policy device first
                 action_context = action_context.to(self.device)
+                
+                # Pad to max_action_dim if needed
+                if hasattr(self.policy.config, 'max_action_dim'):
+                    max_action_dim = self.policy.config.max_action_dim
+                    current_action_dim = action_context.shape[-1]
+                    if current_action_dim < max_action_dim:
+                        # Pad along the last dimension with zeros
+                        padding = torch.zeros(
+                            action_context.shape[0], 
+                            action_context.shape[1], 
+                            max_action_dim - current_action_dim,
+                            dtype=action_context.dtype,
+                            device=self.device
+                        )
+                        action_context = torch.cat([action_context, padding], dim=-1)
+                        self.logger.debug(f"Padded action_context from {current_action_dim} to {max_action_dim}")
+                
                 self.logger.debug(f"Extracted action_context with shape: {action_context.shape}")
             
             # 2. Apply preprocessor

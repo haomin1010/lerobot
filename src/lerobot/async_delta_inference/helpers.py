@@ -127,7 +127,11 @@ def extract_images_from_raw_observation(
     camera_key: str,
 ) -> dict[str, torch.Tensor]:
     """Extract the images from a raw observation."""
-    return torch.tensor(lerobot_obs[camera_key])
+    img = lerobot_obs[camera_key]
+    if isinstance(img, torch.Tensor):
+        return img.detach().clone()
+    else:
+        return torch.tensor(img)
 
 
 def make_lerobot_observation(
@@ -159,8 +163,14 @@ def prepare_raw_observation(
 
     # Turns the image features to (C, H, W) with H, W matching the policy image features.
     # This reduces the resolution of the images
+    def _to_tensor(x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().clone()
+        else:
+            return torch.tensor(x)
+    
     image_dict = {
-        key: resize_robot_observation_image(torch.tensor(lerobot_obs[key]), policy_image_features[key].shape)
+        key: resize_robot_observation_image(_to_tensor(lerobot_obs[key]), policy_image_features[key].shape)
         for key in image_keys
     }
 
