@@ -317,7 +317,10 @@ class SimClient:
                 return x2
 
         future_action_queue = Queue()
-        
+
+        if len(incoming_actions) > self.config.max_actions_to_use:
+            incoming_actions = incoming_actions[:self.config.max_actions_to_use]
+
         # Get current queue state
         with self.action_queue_lock:
             internal_queue = self.action_queue.queue
@@ -638,6 +641,7 @@ class SimClient:
             
             # (1) Send observation if ready (based on queue size or periodic trigger)
             if periodic_request_needed or self.action_queue.qsize() < self.config.request_new_every_n_steps:
+                print("steps_since_last_request=", steps_since_last_request)
                 self.control_loop_observation(obs, task, verbose)
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
