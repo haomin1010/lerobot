@@ -625,7 +625,7 @@ class SimClient:
         episode_count = 0
         step_count = 0
         steps_since_last_request = 0  # Track steps for periodic requests
-        
+        allow_send = True
         # Get max steps from environment config
         max_steps = getattr(self.config.env, 'episode_length', None)
         pbar = None
@@ -640,9 +640,10 @@ class SimClient:
             )
             print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if periodic_request_needed or self.action_queue.qsize() < self.config.request_new_every_n_steps:
+            if allow_send and (periodic_request_needed or self.action_queue.qsize() < self.config.request_new_every_n_steps):
                 print(periodic_request_needed)
                 self.control_loop_observation(obs, task, verbose)
+                allow_send = False
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
                     self.logger.debug(
@@ -652,6 +653,7 @@ class SimClient:
             # (2) Perform action if available
             if self.actions_available():
                 obs, reward, done, info = self.control_loop_action(verbose)
+                allow_send = True
                 step_count += 1
                 steps_since_last_request += 1  # Increment counter for periodic requests
                 
