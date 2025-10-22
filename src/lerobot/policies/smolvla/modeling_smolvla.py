@@ -845,6 +845,37 @@ class VLAFlowMatching(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
+    def _add_noise_to_actions(self, x_t: torch.Tensor, noise_scale: float = 0.01) -> torch.Tensor:
+        """Add noise to x_t, only to the non-padded dimensions.
+        
+        Args:
+            x_t: Action tensor (batch_size, chunk_size, max_action_dim)
+            noise_scale: Scale of noise to add (default: 0.01, which is ~1/10 of typical action range [-1, 1])
+            
+        Returns:
+            Noisy action tensor with same shape
+        """
+        # Get original action dimension (non-padded part)
+        original_action_dim = self.config.action_feature.shape[0] if hasattr(self.config, 'action_feature') else self.config.max_action_dim
+        
+        # Create a copy to avoid modifying original
+        x_t_noisy = x_t.clone()
+        
+        # Generate Gaussian noise only for non-padded dimensions
+        noise = torch.randn(
+            x_t.shape[0], 
+            x_t.shape[1], 
+            original_action_dim,  # Only for real action dimensions
+            device=x_t.device,
+            dtype=x_t.dtype
+        ) * noise_scale
+        
+        # Add noise only to non-padded part
+        x_t_noisy[:, :, :original_action_dim] = x_t[:, :, :original_action_dim] + noise
+        
+        # Padded part remains unchanged (zero)
+        return x_t_noisy
+
     def forward_delta_expert(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
     ) -> Tensor:
@@ -912,17 +943,21 @@ class VLAFlowMatching(nn.Module):
         # Fixed timestep for delta expert
         timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
         
+        # Add noise to x_t (only to non-padded dimensions)
+        x_t_noisy = self._add_noise_to_actions(x_t, noise_scale=0.01)
+        
         # Apply one denoising step using delta_expert
         v_t = self.denoise_step_delta(
             prefix_pad_masks,
             past_key_values,
-            x_t,
+            x_t_noisy,  # Use noisy version
             timestep,
         )
         
-        # Compute loss against ground truth actions
-        # You can customize this loss function based on your objectives
-        losses = F.mse_loss(actions-x_t, v_t, reduction="none")
+        # Compute loss: predict the difference (x_t - x_t_noisy)
+        # This trains the model to denoise
+        target = x_t - x_t_noisy
+        losses = F.mse_loss(target, v_t, reduction="none")
         
         return losses
 
