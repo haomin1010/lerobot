@@ -293,15 +293,67 @@ class SimClient:
                 log_prefix="[CLIENT] Observation",
                 silent=True,
             )
-            _ = self.stub.SendObservations(observation_iterator)
+            response = self.stub.SendObservations(observation_iterator)
             obs_timestep = obs.get_timestep()
             self.logger.debug(f"Sent observation #{obs_timestep} | ")
+
+            # Check if server returned actions immediately
+            if response.data and len(response.data) > 0:
+                # Server returned actions, process them
+                self.logger.debug("Received actions in SendObservations response")
+                timed_actions = pickle.loads(response.data)  # nosec
+                
+                # Add returned actions to existing queue by summing with same timestep
+                self._add_actions_to_queue(timed_actions)
+            else:
+                # Server returned empty (no immediate actions)
+                self.logger.debug("No immediate actions in SendObservations response")
 
             return True
 
         except grpc.RpcError as e:
             self.logger.error(f"Error sending observation #{obs.get_timestep()}: {e}")
             return False
+
+    def _add_actions_to_queue(self, incoming_actions: list[TimedAction]):
+        """Add incoming actions to the queue, summing with existing actions at the same timestep.
+        
+        For actions with the same timestep:
+        - If action already exists in queue, add the new action to it (element-wise sum)
+        - If action doesn't exist in queue, add it directly
+        """
+        with self.action_queue_lock:
+            # Build a dict of existing actions by timestep
+            existing_actions = {action.get_timestep(): action for action in self.action_queue.queue}
+            
+            # Process incoming actions
+            for new_action in incoming_actions:
+                timestep = new_action.get_timestep()
+                
+                if timestep in existing_actions:
+                    # Sum actions at the same timestep
+                    old_action = existing_actions[timestep]
+                    summed_action_tensor = old_action.get_action() + new_action.get_action()
+                    
+                    # Update the action in the dict
+                    existing_actions[timestep] = TimedAction(
+                        timestamp=new_action.get_timestamp(),  # Use newer timestamp
+                        timestep=timestep,
+                        action=summed_action_tensor
+                    )
+                    self.logger.debug(f"Summed action at timestep #{timestep}")
+                else:
+                    # Add new action
+                    existing_actions[timestep] = new_action
+                    self.logger.debug(f"Added new action at timestep #{timestep}")
+            
+            # Rebuild the queue with updated actions (sorted by timestep)
+            new_queue = Queue()
+            for timestep in sorted(existing_actions.keys()):
+                new_queue.put(existing_actions[timestep])
+            
+            self.action_queue = new_queue
+            self.logger.debug(f"Action queue updated, size: {self.action_queue.qsize()}")
 
     def _inspect_action_queue(self):
         with self.action_queue_lock:

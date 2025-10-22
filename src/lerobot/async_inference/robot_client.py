@@ -203,6 +203,7 @@ class RobotClient:
                 log_prefix="[CLIENT] Observation",
                 silent=True,
             )
+            # Server returns Actions (may be empty), we ignore it in async_inference mode
             _ = self.stub.SendObservations(observation_iterator)
             obs_timestep = obs.get_timestep()
             self.logger.debug(f"Sent observation #{obs_timestep} | ")

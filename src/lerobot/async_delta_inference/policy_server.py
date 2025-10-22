@@ -212,7 +212,19 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         ):
             self.logger.debug(f"Observation #{obs_timestep} has been filtered out")
 
-        return services_pb2.Empty()
+        # TODO: Add your logic here to decide whether to return actions immediately
+        # If you want to return actions immediately, set should_return_actions = True
+        # and populate action_chunk with the actions to return
+        should_return_actions = False  # Change this based on your logic
+        action_chunk = None  # Set this to your action chunk if should_return_actions is True
+        
+        if should_return_actions and action_chunk is not None:
+            # Return actions immediately
+            actions_bytes = pickle.dumps(action_chunk)  # nosec
+            return services_pb2.Actions(data=actions_bytes)
+        else:
+            # Return empty Actions (equivalent to Empty)
+            return services_pb2.Actions(data=b"")
 
     def GetActions(self, request, context):  # noqa: N802
         """Returns actions to the robot client. Actions are sent as a single

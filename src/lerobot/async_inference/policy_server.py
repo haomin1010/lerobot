@@ -212,7 +212,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         ):
             self.logger.debug(f"Observation #{obs_timestep} has been filtered out")
 
-        return services_pb2.Empty()
+        # Return empty Actions (compatible with new proto definition)
+        # For async_inference, we always return empty as actions are retrieved via GetActions
+        return services_pb2.Actions(data=b"")
 
     def GetActions(self, request, context):  # noqa: N802
         """Returns actions to the robot client. Actions are sent as a single
