@@ -529,13 +529,13 @@ class SimClient:
             with self.latest_action_lock:
                 latest_action = self.latest_action
 
-            timestep = max(latest_action, 0)
+            timestep = max(latest_action + 1, 0)
             reset_policy = True if timestep <= 0 else False
 
             observation = TimedObservation(
                 timestamp=time.time(),  # need time.time() to compare timestamps across client and server
                 observation=raw_observation,
-                timestep=max(latest_action, 0),
+                timestep=timestep,
                 reset_policy=reset_policy,
             )
 
