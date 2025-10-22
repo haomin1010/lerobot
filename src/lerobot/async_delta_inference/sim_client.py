@@ -220,7 +220,6 @@ class SimClient:
         self.episode_successes = []
         self.current_episode_reward = 0.0
 
-        self.latest_timestep = 0
 
     @property
     def running(self):
@@ -322,7 +321,6 @@ class SimClient:
 
         if len(incoming_actions) > self.config.max_actions_to_use:
             incoming_actions = incoming_actions[:self.config.max_actions_to_use]
-        self.latest_timestep = incoming_actions[-1].get_timestep()
         # Get current queue state
         with self.action_queue_lock:
             internal_queue = self.action_queue.queue
@@ -582,7 +580,6 @@ class SimClient:
     def reset_environment(self):
         """Reset the simulation environment."""
         obs, info = self.vec_env.reset()
-        self.latest_timestep = 0
         # Extract from vectorized format - handle nested pixels dict
         unwrapped_obs = {}
         for k, v in obs.items():
@@ -634,6 +631,7 @@ class SimClient:
         max_steps = getattr(self.config.env, 'episode_length', None)
         pbar = None
 
+        first_send=True
         while self.running and episode_count < self.config.n_episodes:
             control_loop_start = time.perf_counter()
             
@@ -644,9 +642,9 @@ class SimClient:
             )
             print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if self.latest_timestep > last_send_action_timestep and (periodic_request_needed or self.action_queue.qsize() <= 0):
+            if first_send or (periodic_request_needed or self.action_queue.qsize() <= 0):
+                first_send = False
                 self.control_loop_observation(obs, task, verbose)
-                last_send_action_timestep = self.latest_timestep
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
                     self.logger.debug(
@@ -680,6 +678,7 @@ class SimClient:
                 
                 # Check if episode is done
                 if episode_done:
+                    first_send = True
                     episode_count += 1
                     self.episode_rewards.append(self.current_episode_reward)
 
