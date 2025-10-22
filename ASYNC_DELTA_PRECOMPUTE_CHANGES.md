@@ -8,14 +8,14 @@
 
 ### 1. SmolVLA Policy 模型改造 (`src/lerobot/policies/smolvla/modeling_smolvla.py`)
 
-#### 修改了 `sample_actions` 方法，支持分阶段执行：
+#### 修改了 `sample_actions`、`_get_action_chunk` 和 `predict_action_chunk` 方法：
 
 **新增参数：**
-- `return_intermediate`: 如果为 True，在计算完 KV cache 后返回中间状态，不执行 denoising
-- `past_key_values`: 缓存的 KV values，用于从中间状态继续执行
+- `cal_cache`: 如果为 True，在计算完 KV cache 后返回 `(past_key_values, prefix_pad_masks)`，不执行 denoising
+- `past_key_values`: 缓存的 KV values，用于跳过 prefix 计算
 - `prefix_pad_masks`: 缓存的 prefix padding masks
-- `initial_x_t`: 初始 x_t，用于继续 denoising
-- `initial_time`: 初始 time 值
+- `initial_x_t`: 初始 x_t（未使用）
+- `initial_time`: 初始 time 值（未使用）
 
 **执行流程：**
 1. **正常流程**（无缓存）：
@@ -23,13 +23,13 @@
    - 执行完整的 denoising 循环
    - 返回最终的 actions
 
-2. **返回中间状态**（`return_intermediate=True`）：
+2. **缓存模式**（`cal_cache=True`）：
    - 计算 prefix embeddings 和 KV cache
-   - 返回 `(past_key_values, prefix_pad_masks, noise, initial_time, dt, device)`
-   - 不执行 denoising
+   - 返回 `(past_key_values, prefix_pad_masks)`
+   - **不执行 denoising**
 
 3. **从缓存继续**（提供 `past_key_values` 和 `prefix_pad_masks`）：
-   - 跳过 prefix 计算
+   - **跳过 prefix 计算**（节省计算）
    - 直接使用缓存的 KV values
    - 执行 denoising 循环
    - 返回最终的 actions
@@ -46,15 +46,16 @@ self._precomputed_cache = {}  # {timestep: {"past_key_values": ..., "actions": .
 
 #### 新增 `_precompute_actions` 方法：
 
-这个方法在接收到观察时立即执行完整的推理流程：
+这个方法在接收到观察时立即执行推理流程：
 1. 准备观察数据（raw → LeRobot format）
 2. 应用预处理器（preprocessor）
 3. 重置 policy（如果需要）
-4. 调用 `policy.predict_action_chunk` 执行完整推理
-5. 应用后处理器（postprocessor）
-6. 转换为 TimedAction list
-7. 将原始 actions 缓存到 `_precomputed_cache`
-8. **返回处理好的 action_chunk 给调用者**
+4. 调用 `policy.predict_action_chunk(observation, cal_cache=True)` 获取 `past_key_values` 和 `prefix_pad_masks`
+5. 调用 `policy.predict_action_chunk(observation)` 获取 actions
+6. 应用后处理器（postprocessor）
+7. 转换为 TimedAction list
+8. 将 `past_key_values` 和 `prefix_pad_masks` 缓存到 `_precomputed_cache`
+9. **返回处理好的 action_chunk 给调用者**
 
 #### 修改 `SendObservations` 方法：
 
@@ -130,10 +131,11 @@ enable_precompute: bool = field(
    │   └─ action_chunk = _precompute_actions(obs)
    │       ├─ raw_observation → observation (LeRobot format)
    │       ├─ preprocessor(observation)
-   │       ├─ policy.predict_action_chunk(observation)  # 完整推理
+   │       ├─ past_key_values, prefix_pad_masks = policy.predict_action_chunk(observation, cal_cache=True)
+   │       ├─ action_tensor = policy.predict_action_chunk(observation)  # 完整推理获取 actions
    │       ├─ postprocessor(actions)  # 后处理
    │       ├─ convert to TimedAction list
-   │       └─ cache[timestep] = {observation, raw_actions, timestamp}
+   │       └─ cache[timestep] = {observation, past_key_values, prefix_pad_masks, timestamp}
    └─ return action_chunk to client  # 立即返回 actions！
    ```
 
@@ -151,8 +153,10 @@ enable_precompute: bool = field(
    GetActions:
    └─ _predict_action_chunk(obs, use_cache=True)
        ├─ 检查缓存
-       ├─ if 有缓存:
-       │   ├─ 取出缓存的 actions
+       ├─ if 有缓存 (past_key_values and prefix_pad_masks):
+       │   ├─ 取出 observation, past_key_values, prefix_pad_masks
+       │   ├─ policy.predict_action_chunk(observation, past_key_values=..., prefix_pad_masks=...)
+       │   │   └─ 在 sample_actions 中跳过 prefix 计算，直接执行 denoising（快！）
        │   ├─ postprocessor(actions)
        │   └─ return actions
        └─ else:
@@ -252,30 +256,43 @@ python -m lerobot.async_delta_inference.sim_client \
 
 6. **适用范围**：当前只在 `must_go=True` 的观察上执行预计算，这些是真正需要新推理的观察
 
-## 扩展性
+## 核心优化原理
 
-### 如果要使用分阶段执行（未来扩展）：
+### past_key_values 的作用
 
-SmolVLA 的 `sample_actions` 已经支持分阶段执行，如果需要进一步优化，可以：
+在 Transformer 模型中，prefix（图像、语言、状态）的处理非常耗时。`past_key_values` 是这些 prefix 经过 Transformer 层计算后的 Key-Value cache：
 
-1. **第一阶段**（SendObservations 时）：
-   ```python
-   past_key_values, prefix_pad_masks, noise, initial_time, dt, device = \
-       model.sample_actions(..., return_intermediate=True)
-   ```
-   
-2. **第二阶段**（GetActions 时）：
-   ```python
-   actions = model.sample_actions(
-       ..., 
-       past_key_values=past_key_values,
-       prefix_pad_masks=prefix_pad_masks,
-       initial_x_t=noise,
-       initial_time=initial_time
-   )
-   ```
+1. **第一次计算**（`cal_cache=True`）：
+   - 输入：图像、语言、状态 → prefix embeddings
+   - 经过 VLM 的 Transformer 层处理
+   - 输出：`past_key_values`（缓存的 K-V）
 
-这样可以进一步分离计算，但需要存储更多的中间状态。
+2. **后续使用**（传入 `past_key_values`）：
+   - **跳过 prefix 的 Transformer 计算**（节省大量时间！）
+   - 直接使用缓存的 K-V
+   - 只需要处理 action denoising 部分
+
+### 为什么需要两次调用？
+
+在 `_precompute_actions` 中，我们调用了两次 `predict_action_chunk`：
+
+```python
+# 第一次：获取 past_key_values
+past_key_values, prefix_pad_masks = policy.predict_action_chunk(observation, cal_cache=True)
+
+# 第二次：获取 actions
+action_tensor = policy.predict_action_chunk(observation)
+```
+
+**原因**：
+- 第一次调用只计算到 prefix，返回 KV cache，不执行 denoising
+- 第二次调用执行完整流程，获取实际的 actions 返回给客户端
+- KV cache 保存下来，供 GetActions 使用（如果客户端仍然调用）
+
+**优势**：
+- 客户端立即获得 actions（第二次调用）
+- GetActions 可以使用 KV cache 快速重新计算（第一次调用的结果）
+- 总体上，第二次调用的开销已经被客户端提前收到 actions 的收益抵消
 
 ## 总结
 

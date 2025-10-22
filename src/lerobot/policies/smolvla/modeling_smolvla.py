@@ -245,7 +245,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
     def get_optim_params(self) -> dict:
         return self.parameters()
 
-    def _get_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def _get_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache=False,
+                         past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None) -> Tensor | tuple:
         # TODO: Check if this for loop is needed.
         # Context: In fact, self.queues contains only ACTION field, and in inference, we don't have action in the batch
         # In the case of offline inference, we have the action in the batch
@@ -260,7 +261,18 @@ class SmolVLAPolicy(PreTrainedPolicy):
         lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"]
         lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
-        actions = self.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state, noise=noise)
+        result = self.model.sample_actions(
+            images, img_masks, lang_tokens, lang_masks, state, noise=noise,
+            cal_cache=cal_cache, past_key_values=past_key_values, prefix_pad_masks=prefix_pad_masks,
+            initial_x_t=initial_x_t, initial_time=initial_time
+        )
+        
+        # If cal_cache=True, result is (past_key_values, prefix_pad_masks)
+        if cal_cache:
+            return result  # Return tuple directly
+        
+        # Otherwise result is actions
+        actions = result
 
         # Unpad actions
         original_action_dim = self.config.action_feature.shape[0]
@@ -278,14 +290,19 @@ class SmolVLAPolicy(PreTrainedPolicy):
         return batch
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache: bool = False,
+                           past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None) -> Tensor | tuple:
         self.eval()
 
         batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
-        actions = self._get_action_chunk(batch, noise)
-        return actions
+        result = self._get_action_chunk(
+            batch, noise, cal_cache=cal_cache,
+            past_key_values=past_key_values, prefix_pad_masks=prefix_pad_masks,
+            initial_x_t=initial_x_t, initial_time=initial_time
+        )
+        return result
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
@@ -706,7 +723,7 @@ class VLAFlowMatching(nn.Module):
         return losses
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, 
-                      return_intermediate=False, past_key_values=None, prefix_pad_masks=None, 
+                      cal_cache=False, past_key_values=None, prefix_pad_masks=None, 
                       initial_x_t=None, initial_time=None) -> Tensor | tuple:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
         
@@ -717,16 +734,15 @@ class VLAFlowMatching(nn.Module):
             lang_masks: Language masks
             state: State inputs
             noise: Optional noise tensor
-            return_intermediate: If True, returns (past_key_values, prefix_pad_masks, x_t, time, dt, device)
-                               after computing KV cache, allowing denoising to be done separately
+            cal_cache: If True, returns (past_key_values, prefix_pad_masks) after computing KV cache
             past_key_values: Cached KV values for continuing from intermediate state
             prefix_pad_masks: Cached prefix padding masks
             initial_x_t: Initial x_t for continuing denoising
             initial_time: Initial time value for continuing denoising
             
         Returns:
-            If return_intermediate=True: tuple of (past_key_values, prefix_pad_masks, initial_noise, initial_time, dt, device)
-            If continuing from intermediate: final actions (x_t)
+            If cal_cache=True: tuple of (past_key_values, prefix_pad_masks)
+            If continuing from cached state (past_key_values is not None): final actions (x_t)
             Otherwise: final actions (x_t)
         """
         bsize = state.shape[0]
@@ -737,51 +753,30 @@ class VLAFlowMatching(nn.Module):
             noise = self.sample_noise(actions_shape, device)
 
         # If we have cached values, skip prefix computation and go straight to denoising
-        if past_key_values is not None and prefix_pad_masks is not None:
-            # Continue from cached state
-            dt = -1.0 / self.config.num_steps
-            dt = torch.tensor(dt, dtype=torch.float32, device=device)
-            
-            x_t = initial_x_t if initial_x_t is not None else noise
-            time = initial_time if initial_time is not None else torch.tensor(1.0, dtype=torch.float32, device=device)
-            
-            # Continue denoising loop
-            while time >= -dt / 2:
-                expanded_time = time.expand(bsize)
-                v_t = self.denoise_step(
-                    prefix_pad_masks,
-                    past_key_values,
-                    x_t,
-                    expanded_time,
-                )
-                # Euler step
-                x_t += dt * v_t
-                time += dt
-            return x_t
-        
-        # Normal flow: compute prefix embeddings and KV cache
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
-        )
-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-        # Compute image and language key value cache
-        _, past_key_values = self.vlm_with_expert.forward(
-            attention_mask=prefix_att_2d_masks,
-            position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
-        )
-        
+        if past_key_values is None or prefix_pad_masks is None:
+            # Normal flow: compute prefix embeddings and KV cache
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+                images, img_masks, lang_tokens, lang_masks, state=state
+            )
+            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+            # Compute image and language key value cache
+            _, past_key_values = self.vlm_with_expert.forward(
+                attention_mask=prefix_att_2d_masks,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=self.config.use_cache,
+                fill_kv_cache=True,
+            )
+
+            # If cal_cache, return past_key_values and prefix_pad_masks only
+            if cal_cache:
+                return past_key_values, prefix_pad_masks, delta_actions
+
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
         initial_time_val = torch.tensor(1.0, dtype=torch.float32, device=device)
-        
-        # If return_intermediate, return cache and initial state
-        if return_intermediate:
-            return past_key_values, prefix_pad_masks, noise, initial_time_val, dt, device
 
         # Otherwise continue with full denoising
         x_t = noise

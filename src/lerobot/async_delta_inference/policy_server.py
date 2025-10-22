@@ -315,10 +315,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return True
 
     def _precompute_actions(self, observation_t: TimedObservation) -> list[TimedAction] | None:
-        """Precompute actions for an observation and cache them.
+        """Precompute actions for an observation and cache past_key_values.
         
-        This runs the full inference pipeline up to and including action generation,
-        storing the results in the cache for later retrieval by GetActions.
+        This runs the inference pipeline to get both actions and past_key_values:
+        - Actions are returned to client immediately
+        - past_key_values are cached for later use by GetActions
         
         Returns:
             List of TimedAction if successful, None if error occurs
@@ -341,17 +342,18 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 self.policy.reset()
                 self.logger.debug("Policy state reset for new episode (precompute)")
             
-            # 4. Get action chunk by calling policy's predict_action_chunk
-            # For smolVLA, this will run the full sample_actions including forward and denoising
+            # 4. Get past_key_values and prefix_pad_masks by calling predict_action_chunk with cal_cache=True
             self.policy.eval()
-            action_tensor = self.policy.predict_action_chunk(observation)
+            past_key_values, prefix_pad_masks, delta_actions = self.policy.predict_action_chunk(observation, cal_cache=True)
+
+            action_tensor = delta_actions
             
             if action_tensor.ndim != 3:
                 action_tensor = action_tensor.unsqueeze(0)
             
             action_tensor = action_tensor[:, : self.actions_per_chunk, :]
             
-            # 5. Apply postprocessor to get final actions
+            # 6. Apply postprocessor to get final actions
             _, chunk_size, _ = action_tensor.shape
             processed_actions = []
             for i in range(chunk_size):
@@ -362,22 +364,23 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             # Stack back to (B, chunk_size, action_dim), then remove batch dim
             final_action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
             
-            # 6. Convert to TimedAction list
+            # 7. Convert to TimedAction list
             action_chunk = self._time_action_chunk(
                 observation_t.get_timestamp(), list(final_action_tensor), observation_t.get_timestep()
             )
             
-            # 7. Store raw actions (before postprocessing) in cache for GetActions fallback
+            # 8. Store past_key_values, prefix_pad_masks and observation in cache for GetActions
             with self._precomputed_cache_lock:
                 self._precomputed_cache[observation_t.get_timestep()] = {
                     "observation": observation,
-                    "actions": action_tensor,
+                    "past_key_values": past_key_values,
+                    "prefix_pad_masks": prefix_pad_masks,
                     "timestamp": time.time()
                 }
             
             compute_time = time.perf_counter() - start_time
             self.logger.info(
-                f"Precomputed actions for observation #{observation_t.get_timestep()} | "
+                f"Precomputed actions and cached past_key_values for observation #{observation_t.get_timestep()} | "
                 f"Time: {compute_time * 1000:.2f}ms | "
                 f"Action shape: {action_tensor.shape} | "
                 f"Returning {len(action_chunk)} timed actions to client"
@@ -426,11 +429,22 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         ]
 
     def _get_action_chunk(self, observation: dict[str, torch.Tensor], precomputed_data: dict | None = None) -> torch.Tensor:
-        """Get an action chunk from the policy. The chunk contains only"""
-        # If we have precomputed data, use it
-        if precomputed_data is not None and "actions" in precomputed_data:
-            chunk = precomputed_data["actions"]
+        """Get an action chunk from the policy.
+        
+        If precomputed_data contains past_key_values and prefix_pad_masks, use them to skip the prefix computation.
+        """
+        # If we have precomputed past_key_values and prefix_pad_masks, use them
+        if precomputed_data is not None and "past_key_values" in precomputed_data and "prefix_pad_masks" in precomputed_data:
+            past_key_values = precomputed_data["past_key_values"]
+            prefix_pad_masks = precomputed_data["prefix_pad_masks"]
+            # Call predict_action_chunk with cached values - this will skip prefix computation
+            chunk = self.policy.predict_action_chunk(
+                observation, 
+                past_key_values=past_key_values,
+                prefix_pad_masks=prefix_pad_masks
+            )
         else:
+            # Normal flow: compute everything from scratch
             chunk = self.policy.predict_action_chunk(observation)
         
         if chunk.ndim != 3:
@@ -455,12 +469,20 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 precomputed_data = self._precomputed_cache.get(observation_t.get_timestep())
         
         if precomputed_data is not None:
-            self.logger.info(f"Using precomputed results for observation #{observation_t.get_timestep()}")
-            # Use cached observation and actions
+            self.logger.info(f"Using precomputed past_key_values for observation #{observation_t.get_timestep()}")
+            # Use cached observation and past_key_values
             observation = precomputed_data["observation"]
-            action_tensor = precomputed_data["actions"]
             
-            # Skip to postprocessing
+            # Get action using cached past_key_values (this skips prefix computation)
+            start_inference = time.perf_counter()
+            action_tensor = self._get_action_chunk(observation, precomputed_data)
+            inference_time = time.perf_counter() - start_inference
+            
+            self.logger.info(
+                f"Inference with cached past_key_values took {inference_time:.4f}s, action shape: {action_tensor.shape}"
+            )
+            
+            # Apply postprocessing
             start_postprocess = time.perf_counter()
             _, chunk_size, _ = action_tensor.shape
 
@@ -480,7 +502,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             postprocessing_time = postprocess_stops - start_postprocess
             
             self.logger.info(
-                f"Observation {observation_t.get_timestep()} (cached) | "
+                f"Observation {observation_t.get_timestep()} (using cached past_key_values) | "
+                f"Inference time: {1000 * inference_time:.2f}ms | "
                 f"Postprocessing time: {1000 * postprocessing_time:.2f}ms"
             )
             
