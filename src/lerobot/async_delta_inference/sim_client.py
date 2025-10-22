@@ -638,10 +638,10 @@ class SimClient:
                 self.config.request_new_every_n_steps is not None 
                 and steps_since_last_request >= self.config.request_new_every_n_steps
             )
-            
+            print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
             if periodic_request_needed or self.action_queue.qsize() < self.config.request_new_every_n_steps:
-                print("steps_since_last_request=", steps_since_last_request)
+                print(periodic_request_needed)
                 self.control_loop_observation(obs, task, verbose)
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
@@ -656,12 +656,12 @@ class SimClient:
                 steps_since_last_request += 1  # Increment counter for periodic requests
                 
                 # Create progress bar for first step of episode
-                # if pbar is None:
-                #     pbar = tqdm(
-                #         total=max_steps,
-                #         desc=f"Episode {episode_count + 1}/{self.config.n_episodes}",
-                #         unit="step"
-                #     )
+                if pbar is None:
+                    pbar = tqdm(
+                        total=max_steps,
+                        desc=f"Episode {episode_count + 1}/{self.config.n_episodes}",
+                        unit="step"
+                    )
                 
                 # Update progress bar
                 pbar.update(1)
