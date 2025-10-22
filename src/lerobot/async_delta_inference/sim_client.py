@@ -219,6 +219,10 @@ class SimClient:
         self.episode_rewards = []
         self.episode_successes = []
         self.current_episode_reward = 0.0
+        
+        # Periodic request tracking (thread-safe)
+        self.steps_since_last_request = 0
+        self.steps_since_last_request_lock = threading.Lock()
 
 
     @property
@@ -422,6 +426,12 @@ class SimClient:
                 queue_update_time = time.perf_counter() - start_time
 
                 self.must_go.set()  # after receiving actions, next empty queue triggers must-go processing!
+                
+                # Reset periodic request counter when new actions arrive
+                with self.steps_since_last_request_lock:
+                    self.steps_since_last_request = 0
+                    if verbose:
+                        self.logger.debug("Reset steps_since_last_request to 0 (new actions received)")
 
                 if verbose:
                     # Get queue state after changes
@@ -628,7 +638,6 @@ class SimClient:
         
         episode_count = 0
         step_count = 0
-        steps_since_last_request = 0  # Track steps for periodic requests
         last_send_action_timestep = -1
         # Get max steps from environment config
         max_steps = getattr(self.config.env, 'episode_length', None)
@@ -639,17 +648,19 @@ class SimClient:
             control_loop_start = time.perf_counter()
             
             # Check if we should request new actions based on periodic trigger
-            periodic_request_needed = (
-                self.config.request_new_every_n_steps is not None 
-                and steps_since_last_request >= self.config.request_new_every_n_steps
-            )
-            print("steps_since_last_request=", steps_since_last_request)
+            with self.steps_since_last_request_lock:
+                periodic_request_needed = (
+                    self.config.request_new_every_n_steps is not None 
+                    and self.steps_since_last_request >= self.config.request_new_every_n_steps
+                )
+                print("steps_since_last_request=", self.steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
             if periodic_request_needed or self.action_queue.qsize() <= 0:
                 print("-----------send obs ---------------")
                 self.control_loop_observation(obs, task, periodic_request_needed, verbose)
                 if periodic_request_needed:
-                    steps_since_last_request = 0  # Reset counter after request
+                    with self.steps_since_last_request_lock:
+                        self.steps_since_last_request = 0  # Reset counter after request
                     self.logger.debug(
                         f"Periodic action request triggered (every {self.config.request_new_every_n_steps} steps)"
                     )
@@ -658,7 +669,8 @@ class SimClient:
             if self.actions_available():
                 obs, reward, done, info = self.control_loop_action(verbose)
                 step_count += 1
-                steps_since_last_request += 1  # Increment counter for periodic requests
+                with self.steps_since_last_request_lock:
+                    self.steps_since_last_request += 1  # Increment counter for periodic requests
                 
                 # Create progress bar for first step of episode
                 if pbar is None:
@@ -706,7 +718,8 @@ class SimClient:
                     )
                     
                     step_count = 0
-                    steps_since_last_request = 0  # Reset periodic request counter for new episode
+                    with self.steps_since_last_request_lock:
+                        self.steps_since_last_request = 0  # Reset periodic request counter for new episode
                     
                     # Reset environment for next episode if not done with all episodes
                     if episode_count < self.config.n_episodes:
