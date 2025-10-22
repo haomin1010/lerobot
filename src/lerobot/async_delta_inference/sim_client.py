@@ -322,7 +322,7 @@ class SimClient:
 
         if len(incoming_actions) > self.config.max_actions_to_use:
             incoming_actions = incoming_actions[:self.config.max_actions_to_use]
-
+        self.latest_timestep = incoming_actions[-1].get_timestep()
         # Get current queue state
         with self.action_queue_lock:
             internal_queue = self.action_queue.queue
@@ -418,7 +418,6 @@ class SimClient:
                         f"Deserialization time: {deserialize_time * 1000:.2f}ms"
                     )
 
-                self.latest_timestep = timed_actions[-1].get_timestep()
                 # Update action queue
                 start_time = time.perf_counter()
                 self._aggregate_action_queues(timed_actions, self.config.aggregate_fn)
