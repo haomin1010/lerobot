@@ -327,14 +327,14 @@ class SimClient:
         
         # If replace_actions_on_new is True, discard all old actions and use only new ones
         if self.config.replace_actions_on_new:
+            print("-----------")
+            print(incoming_actions[0].get_timestep())
+            print(latest_action)
+            print("-----------")
             # Simply add all new actions that are newer than latest_action
             for new_action in incoming_actions:
                 if new_action.get_timestep() > latest_action:
                     future_action_queue.put(new_action)
-                    print('---------')
-                    print(new_action.get_timestep())
-                    print(latest_action)
-                    print('---------')
         else:
             # Keep old actions and merge with new ones (original behavior)
             current_action_queue = {action.get_timestep(): action.get_action() for action in internal_queue}
@@ -529,10 +529,14 @@ class SimClient:
             with self.latest_action_lock:
                 latest_action = self.latest_action
 
+            timestep = max(latest_action, 0)
+            reset_policy = True if timestep <= 0 else False
+
             observation = TimedObservation(
                 timestamp=time.time(),  # need time.time() to compare timestamps across client and server
                 observation=raw_observation,
                 timestep=max(latest_action, 0),
+                reset_policy=reset_policy,
             )
 
             obs_capture_time = time.perf_counter() - start_time
@@ -581,7 +585,27 @@ class SimClient:
                 unwrapped_obs[k] = v[0]
         obs = unwrapped_obs
         info = info[0] if isinstance(info, (list, tuple)) else info
+        
+        # Reset episode-specific state
         self.current_episode_reward = 0.0
+        
+        # Reset action tracking for new episode
+        with self.latest_action_lock:
+            self.latest_action = -1
+        
+        # Clear action queue to avoid old actions affecting new episode
+        with self.action_queue_lock:
+            while not self.action_queue.empty():
+                try:
+                    self.action_queue.get_nowait()
+                except:
+                    break
+        
+        # Set must_go flag to ensure first observation is processed
+        self.must_go.set()
+        
+        self.logger.debug("Environment and action state reset for new episode")
+        
         return obs, info
 
     def control_loop(self, task: str, verbose: bool = False):
@@ -611,7 +635,7 @@ class SimClient:
             )
             
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if self._ready_to_send_observation() or periodic_request_needed:
+            if periodic_request_needed:
                 self.control_loop_observation(obs, task, verbose)
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
