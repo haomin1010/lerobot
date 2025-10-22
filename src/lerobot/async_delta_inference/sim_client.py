@@ -520,6 +520,7 @@ class SimClient:
     def control_loop_observation(self, obs: dict, task: str, verbose: bool = False) -> RawObservation:
         """Process and send observation to policy server."""
         try:
+            print("333")
             # Get serialized observation bytes from the function
             start_time = time.perf_counter()
 
@@ -541,6 +542,7 @@ class SimClient:
 
             obs_capture_time = time.perf_counter() - start_time
 
+            print("444")
             # If there are no actions left in the queue, the observation must go through processing!
             with self.action_queue_lock:
                 observation.must_go = self.must_go.is_set() and self.action_queue.empty()
@@ -567,6 +569,7 @@ class SimClient:
                     f"Ts={observation.get_timestamp():.6f} | Processing observation took {obs_capture_time:.6f}s"
                 )
 
+            print("555")
             return raw_observation
 
         except Exception as e:
@@ -626,6 +629,7 @@ class SimClient:
         pbar = None
 
         while self.running and episode_count < self.config.n_episodes:
+            print("111")
             control_loop_start = time.perf_counter()
             
             # Check if we should request new actions based on periodic trigger
@@ -642,7 +646,8 @@ class SimClient:
                     self.logger.debug(
                         f"Periodic action request triggered (every {self.config.request_new_every_n_steps} steps)"
                     )
-            
+
+            print("222")
             # (2) Perform action if available
             if self.actions_available():
                 obs, reward, done, info = self.control_loop_action(verbose)
