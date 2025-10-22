@@ -331,6 +331,10 @@ class SimClient:
             for new_action in incoming_actions:
                 if new_action.get_timestep() > latest_action:
                     future_action_queue.put(new_action)
+                    print('---------')
+                    print(new_action.get_timestep())
+                    print(latest_action)
+                    print('---------')
         else:
             # Keep old actions and merge with new ones (original behavior)
             current_action_queue = {action.get_timestep(): action.get_action() for action in internal_queue}

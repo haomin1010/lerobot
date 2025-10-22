@@ -62,16 +62,8 @@ class SimClientConfig:
     # Number of actions to actually use from the received chunk (rest are discarded)
     # For example, if server sends 50 actions but we use 20, the remaining 30 are discarded
     max_actions_to_use: int = field(
-        default=20, 
+        default=20,
         metadata={"help": "Maximum number of actions to use from each chunk (default: 20, rest discarded)"}
-    )
-    
-    # When to request new actions (if queue size drops to this value, send new observation)
-    # For example, if max_actions_to_use=20 and request_new_at=10, we request new actions 
-    # when 10 actions remain in the queue (half-way through)
-    request_new_at: int = field(
-        default=10,
-        metadata={"help": "Request new actions when queue size drops to this value (default: 10)"}
     )
     
     # Whether to replace remaining actions with new predictions (True) or keep old ones (False)
