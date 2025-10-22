@@ -330,6 +330,8 @@ class SimClient:
             print("-----------")
             print(incoming_actions[0].get_timestep())
             print(latest_action)
+            print(self.action_queue.qsize())
+            print(len(incoming_actions))
             print("-----------")
             # Simply add all new actions that are newer than latest_action
             for new_action in incoming_actions:
