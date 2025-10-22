@@ -384,6 +384,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             
             action_tensor = action_tensor[:, : self.actions_per_chunk, :]
             
+            # 5.5. Unpad actions to original action_dim (remove the padding we added)
+            # delta_actions might be padded to max_action_dim, but we need original action_dim
+            if hasattr(self.policy.config, 'action_feature'):
+                original_action_dim = self.policy.config.action_feature.shape[0]
+                action_tensor = action_tensor[:, :, :original_action_dim]
+                self.logger.debug(f"Unpadded action_tensor to original_action_dim: {original_action_dim}")
+            
             # 6. Apply postprocessor to get final actions
             _, chunk_size, _ = action_tensor.shape
             processed_actions = []
