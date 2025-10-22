@@ -152,15 +152,6 @@ class SimClientConfig:
                 f"max_actions_to_use ({self.max_actions_to_use}) cannot be greater than "
                 f"actions_per_chunk ({self.actions_per_chunk})"
             )
-        
-        if self.request_new_at <= 0:
-            raise ValueError(f"request_new_at must be positive, got {self.request_new_at}")
-        
-        if self.request_new_at > self.max_actions_to_use:
-            raise ValueError(
-                f"request_new_at ({self.request_new_at}) cannot be greater than "
-                f"max_actions_to_use ({self.max_actions_to_use})"
-            )
 
         if self.n_episodes <= 0:
             raise ValueError(f"n_episodes must be positive, got {self.n_episodes}")
@@ -186,7 +177,6 @@ class SimClientConfig:
             "n_episodes": self.n_episodes,
             "seed": self.seed,
             "max_actions_to_use": self.max_actions_to_use,
-            "request_new_at": self.request_new_at,
             "replace_actions_on_new": self.replace_actions_on_new,
             "save_videos": self.save_videos,
             "max_episodes_rendered": self.max_episodes_rendered,
