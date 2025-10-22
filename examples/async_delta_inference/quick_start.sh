@@ -66,7 +66,7 @@ cleanup() {
 
 # 启动 PolicyServer
 echo "启动 PolicyServer..."
-python -m lerobot.async_inference.policy_server \
+python -m lerobot.async_delta_inference.policy_server \
     --host=$HOST \
     --port=$PORT \
     --fps=$FPS \

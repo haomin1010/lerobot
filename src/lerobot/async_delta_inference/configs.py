@@ -21,6 +21,8 @@ from lerobot.envs.configs import EnvConfig
 
 from .constants import (
     DEFAULT_FPS,
+    DEFAULT_INFERENCE_LATENCY,
+    DEFAULT_OBS_QUEUE_TIMEOUT,
 )
 
 # Aggregate function registry for CLI usage
@@ -38,6 +40,63 @@ def get_aggregate_function(name: str) -> Callable[[torch.Tensor, torch.Tensor], 
         available = list(AGGREGATE_FUNCTIONS.keys())
         raise ValueError(f"Unknown aggregate function '{name}'. Available: {available}")
     return AGGREGATE_FUNCTIONS[name]
+
+
+@dataclass
+class PolicyServerConfig:
+    """Configuration for PolicyServer.
+
+    This class defines all configurable parameters for the PolicyServer,
+    including networking settings and action chunking specifications.
+    """
+
+    # Networking configuration
+    host: str = field(default="localhost", metadata={"help": "Host address to bind the server to"})
+    port: int = field(default=8080, metadata={"help": "Port number to bind the server to"})
+
+    # Timing configuration
+    fps: int = field(default=DEFAULT_FPS, metadata={"help": "Frames per second"})
+    inference_latency: float = field(
+        default=DEFAULT_INFERENCE_LATENCY, metadata={"help": "Target inference latency in seconds"}
+    )
+
+    obs_queue_timeout: float = field(
+        default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
+    )
+
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if self.port < 1 or self.port > 65535:
+            raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
+
+        if self.environment_dt <= 0:
+            raise ValueError(f"environment_dt must be positive, got {self.environment_dt}")
+
+        if self.inference_latency < 0:
+            raise ValueError(f"inference_latency must be non-negative, got {self.inference_latency}")
+
+        if self.obs_queue_timeout < 0:
+            raise ValueError(f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}")
+
+    @classmethod
+    def from_dict(cls, config_dict: dict) -> "PolicyServerConfig":
+        """Create a PolicyServerConfig from a dictionary."""
+        return cls(**config_dict)
+
+    @property
+    def environment_dt(self) -> float:
+        """Environment time step, in seconds"""
+        return 1 / self.fps
+
+    def to_dict(self) -> dict:
+        """Convert the configuration to a dictionary."""
+        return {
+            "host": self.host,
+            "port": self.port,
+            "fps": self.fps,
+            "environment_dt": self.environment_dt,
+            "inference_latency": self.inference_latency,
+        }
 
 
 @dataclass
