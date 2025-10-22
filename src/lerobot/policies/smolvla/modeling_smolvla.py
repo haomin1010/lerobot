@@ -236,6 +236,23 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self.model = VLAFlowMatching(config)
         self.reset()
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs):
+        """加载预训练模型，忽略 delta_expert 相关的缺失参数警告"""
+        # 调用父类的 from_pretrained
+        policy = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+
+        # 如果需要初始化 delta_expert 参数，可以在这里添加逻辑
+        # 例如：从 lm_expert 复制参数到 delta_expert
+        if hasattr(policy.model, 'vlm_with_expert') and hasattr(policy.model.vlm_with_expert, 'delta_expert'):
+            # 可选：用 lm_expert 的参数初始化 delta_expert
+            policy.model.vlm_with_expert.delta_expert.load_state_dict(
+                policy.model.vlm_with_expert.lm_expert.state_dict(), strict=False
+            )
+
+        return policy
+
+
     def reset(self):
         """This should be called whenever the environment is reset."""
         self._queues = {
