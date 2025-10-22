@@ -334,12 +334,12 @@ class SimClient:
         
         # If replace_actions_on_new is True, discard all old actions and use only new ones
         if self.config.replace_actions_on_new:
-            print("-----------")
-            print(incoming_actions[0].get_timestep())
-            print(latest_action)
-            print(self.action_queue.qsize())
-            print(len(incoming_actions))
-            print("-----------")
+            # print("-----------")
+            # print(incoming_actions[0].get_timestep())
+            # print(latest_action)
+            # print(self.action_queue.qsize())
+            # print(len(incoming_actions))
+            # print("-----------")
             # Simply add all new actions that are newer than latest_action
             for new_action in incoming_actions:
                 if new_action.get_timestep() > latest_action:
@@ -384,7 +384,7 @@ class SimClient:
                 actions_chunk = self.stub.GetActions(services_pb2.Empty())
                 if len(actions_chunk.data) == 0:
                     continue  # received `Empty` from server, wait for next call
-                print("------------receive data-------------")
+
                 receive_time = time.time()
 
                 # Deserialize bytes back into list[TimedAction]
@@ -653,10 +653,8 @@ class SimClient:
                     self.config.request_new_every_n_steps is not None 
                     and self.steps_since_last_request >= self.config.request_new_every_n_steps
                 )
-                print("steps_since_last_request=", self.steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
             if periodic_request_needed or self.action_queue.qsize() <= 0:
-                print("-----------send obs ---------------")
                 self.control_loop_observation(obs, task, periodic_request_needed, verbose)
                 if periodic_request_needed:
                     with self.steps_since_last_request_lock:
