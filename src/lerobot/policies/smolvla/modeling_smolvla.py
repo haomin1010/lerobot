@@ -705,8 +705,30 @@ class VLAFlowMatching(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
-    def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:
-        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+    def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, 
+                      return_intermediate=False, past_key_values=None, prefix_pad_masks=None, 
+                      initial_x_t=None, initial_time=None) -> Tensor | tuple:
+        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
+        
+        Args:
+            images: Image inputs
+            img_masks: Image masks
+            lang_tokens: Language tokens
+            lang_masks: Language masks
+            state: State inputs
+            noise: Optional noise tensor
+            return_intermediate: If True, returns (past_key_values, prefix_pad_masks, x_t, time, dt, device)
+                               after computing KV cache, allowing denoising to be done separately
+            past_key_values: Cached KV values for continuing from intermediate state
+            prefix_pad_masks: Cached prefix padding masks
+            initial_x_t: Initial x_t for continuing denoising
+            initial_time: Initial time value for continuing denoising
+            
+        Returns:
+            If return_intermediate=True: tuple of (past_key_values, prefix_pad_masks, initial_noise, initial_time, dt, device)
+            If continuing from intermediate: final actions (x_t)
+            Otherwise: final actions (x_t)
+        """
         bsize = state.shape[0]
         device = state.device
 
@@ -714,6 +736,30 @@ class VLAFlowMatching(nn.Module):
             actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
 
+        # If we have cached values, skip prefix computation and go straight to denoising
+        if past_key_values is not None and prefix_pad_masks is not None:
+            # Continue from cached state
+            dt = -1.0 / self.config.num_steps
+            dt = torch.tensor(dt, dtype=torch.float32, device=device)
+            
+            x_t = initial_x_t if initial_x_t is not None else noise
+            time = initial_time if initial_time is not None else torch.tensor(1.0, dtype=torch.float32, device=device)
+            
+            # Continue denoising loop
+            while time >= -dt / 2:
+                expanded_time = time.expand(bsize)
+                v_t = self.denoise_step(
+                    prefix_pad_masks,
+                    past_key_values,
+                    x_t,
+                    expanded_time,
+                )
+                # Euler step
+                x_t += dt * v_t
+                time += dt
+            return x_t
+        
+        # Normal flow: compute prefix embeddings and KV cache
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state=state
         )
@@ -728,11 +774,18 @@ class VLAFlowMatching(nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
         )
+        
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
+        initial_time_val = torch.tensor(1.0, dtype=torch.float32, device=device)
+        
+        # If return_intermediate, return cache and initial state
+        if return_intermediate:
+            return past_key_values, prefix_pad_masks, noise, initial_time_val, dt, device
 
+        # Otherwise continue with full denoising
         x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        time = initial_time_val
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
             v_t = self.denoise_step(

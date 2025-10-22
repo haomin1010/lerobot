@@ -63,6 +63,11 @@ class PolicyServerConfig:
     obs_queue_timeout: float = field(
         default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
     )
+    
+    # Precomputation configuration
+    enable_precompute: bool = field(
+        default=True, metadata={"help": "Enable immediate action precomputation when observation is received"}
+    )
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -96,6 +101,7 @@ class PolicyServerConfig:
             "fps": self.fps,
             "environment_dt": self.environment_dt,
             "inference_latency": self.inference_latency,
+            "enable_precompute": self.enable_precompute,
         }
 
 

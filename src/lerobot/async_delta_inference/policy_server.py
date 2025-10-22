@@ -89,6 +89,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+        
+        # Cache for preprocessed results
+        self._precomputed_cache_lock = threading.Lock()
+        self._precomputed_cache = {}  # {timestep: {"past_key_values": ..., "actions": ..., "observation": ...}}
 
     @property
     def running(self):
@@ -106,6 +110,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
+        
+        # Clear precomputed cache
+        with self._precomputed_cache_lock:
+            self._precomputed_cache = {}
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -213,23 +221,26 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             f"Deserialization time: {deserialize_time:.6f}s"
         )
 
-        if not self._enqueue_observation(
-            timed_observation  # wrapping a RawObservation
-        ):
-            self.logger.debug(f"Observation #{obs_timestep} has been filtered out")
-
-        # TODO: Add your logic here to decide whether to return actions immediately
-        # If you want to return actions immediately, set should_return_actions = True
-        # and populate action_chunk with the actions to return
-        should_return_actions = False  # Change this based on your logic
-        action_chunk = None  # Set this to your action chunk if should_return_actions is True
+        enqueued = self._enqueue_observation(timed_observation)
         
-        if should_return_actions and action_chunk is not None:
-            # Return actions immediately
+        action_chunk = None
+        if not enqueued:
+            self.logger.debug(f"Observation #{obs_timestep} has been filtered out")
+        else:
+            # If observation was enqueued and has must_go flag, precompute actions immediately
+            if timed_observation.must_go and self.config.enable_precompute:
+                self.logger.info(f"Starting immediate precomputation for observation #{obs_timestep}")
+                action_chunk = self._precompute_actions(timed_observation)
+
+        # Return actions if precomputed, otherwise return empty
+        if action_chunk is not None and len(action_chunk) > 0:
             actions_bytes = pickle.dumps(action_chunk)  # nosec
+            self.logger.info(
+                f"Returning {len(action_chunk)} precomputed actions to client for observation #{obs_timestep}"
+            )
             return services_pb2.Actions(data=actions_bytes)
         else:
-            # Return empty Actions (equivalent to Empty)
+            # Return empty Actions
             return services_pb2.Actions(data=b"")
 
     def GetActions(self, request, context):  # noqa: N802
@@ -303,6 +314,81 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         else:
             return True
 
+    def _precompute_actions(self, observation_t: TimedObservation) -> list[TimedAction] | None:
+        """Precompute actions for an observation and cache them.
+        
+        This runs the full inference pipeline up to and including action generation,
+        storing the results in the cache for later retrieval by GetActions.
+        
+        Returns:
+            List of TimedAction if successful, None if error occurs
+        """
+        try:
+            start_time = time.perf_counter()
+            
+            # 1. Prepare observation
+            observation: Observation = raw_observation_to_observation(
+                observation_t.get_observation(),
+                self.lerobot_features,
+                self.policy_image_features,
+            )
+            
+            # 2. Apply preprocessor
+            observation = self.preprocessor(observation)
+            
+            # 3. Reset policy if requested
+            if observation_t.reset_policy:
+                self.policy.reset()
+                self.logger.debug("Policy state reset for new episode (precompute)")
+            
+            # 4. Get action chunk by calling policy's predict_action_chunk
+            # For smolVLA, this will run the full sample_actions including forward and denoising
+            self.policy.eval()
+            action_tensor = self.policy.predict_action_chunk(observation)
+            
+            if action_tensor.ndim != 3:
+                action_tensor = action_tensor.unsqueeze(0)
+            
+            action_tensor = action_tensor[:, : self.actions_per_chunk, :]
+            
+            # 5. Apply postprocessor to get final actions
+            _, chunk_size, _ = action_tensor.shape
+            processed_actions = []
+            for i in range(chunk_size):
+                single_action = action_tensor[:, i, :]
+                processed_action = self.postprocessor(single_action)
+                processed_actions.append(processed_action)
+            
+            # Stack back to (B, chunk_size, action_dim), then remove batch dim
+            final_action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
+            
+            # 6. Convert to TimedAction list
+            action_chunk = self._time_action_chunk(
+                observation_t.get_timestamp(), list(final_action_tensor), observation_t.get_timestep()
+            )
+            
+            # 7. Store raw actions (before postprocessing) in cache for GetActions fallback
+            with self._precomputed_cache_lock:
+                self._precomputed_cache[observation_t.get_timestep()] = {
+                    "observation": observation,
+                    "actions": action_tensor,
+                    "timestamp": time.time()
+                }
+            
+            compute_time = time.perf_counter() - start_time
+            self.logger.info(
+                f"Precomputed actions for observation #{observation_t.get_timestep()} | "
+                f"Time: {compute_time * 1000:.2f}ms | "
+                f"Action shape: {action_tensor.shape} | "
+                f"Returning {len(action_chunk)} timed actions to client"
+            )
+            
+            return action_chunk
+            
+        except Exception as e:
+            self.logger.error(f"Error precomputing actions for observation #{observation_t.get_timestep()}: {e}")
+            return None
+
     def _enqueue_observation(self, obs: TimedObservation) -> bool:
         """Enqueue an observation if it must go through processing, otherwise skip it.
         Observations not in queue are never run through the policy network"""
@@ -339,24 +425,72 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             for i, action in enumerate(action_chunk)
         ]
 
-    def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _get_action_chunk(self, observation: dict[str, torch.Tensor], precomputed_data: dict | None = None) -> torch.Tensor:
         """Get an action chunk from the policy. The chunk contains only"""
-        chunk = self.policy.predict_action_chunk(observation)
+        # If we have precomputed data, use it
+        if precomputed_data is not None and "actions" in precomputed_data:
+            chunk = precomputed_data["actions"]
+        else:
+            chunk = self.policy.predict_action_chunk(observation)
+        
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
 
         return chunk[:, : self.actions_per_chunk, :]
 
-    def _predict_action_chunk(self, observation_t: TimedObservation) -> list[TimedAction]:
+    def _predict_action_chunk(self, observation_t: TimedObservation, use_cache: bool = True) -> list[TimedAction]:
         """Predict an action chunk based on an observation.
 
         Pipeline:
         1. Convert raw observation to LeRobot format
         2. Apply preprocessor (tokenization, normalization, batching, device placement)
-        3. Run policy inference to get action chunk
+        3. Run policy inference to get action chunk (or use cached results)
         4. Apply postprocessor (unnormalization, device movement)
         5. Convert to TimedAction list
         """
+        # Check if we have precomputed results in cache
+        precomputed_data = None
+        if use_cache:
+            with self._precomputed_cache_lock:
+                precomputed_data = self._precomputed_cache.get(observation_t.get_timestep())
+        
+        if precomputed_data is not None:
+            self.logger.info(f"Using precomputed results for observation #{observation_t.get_timestep()}")
+            # Use cached observation and actions
+            observation = precomputed_data["observation"]
+            action_tensor = precomputed_data["actions"]
+            
+            # Skip to postprocessing
+            start_postprocess = time.perf_counter()
+            _, chunk_size, _ = action_tensor.shape
+
+            # Process each action in the chunk
+            processed_actions = []
+            for i in range(chunk_size):
+                single_action = action_tensor[:, i, :]
+                processed_action = self.postprocessor(single_action)
+                processed_actions.append(processed_action)
+
+            action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
+            
+            action_chunk = self._time_action_chunk(
+                observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
+            )
+            postprocess_stops = time.perf_counter()
+            postprocessing_time = postprocess_stops - start_postprocess
+            
+            self.logger.info(
+                f"Observation {observation_t.get_timestep()} (cached) | "
+                f"Postprocessing time: {1000 * postprocessing_time:.2f}ms"
+            )
+            
+            # Remove from cache after use
+            with self._precomputed_cache_lock:
+                self._precomputed_cache.pop(observation_t.get_timestep(), None)
+            
+            return action_chunk
+        
+        # Normal flow: no cache available
         """1. Prepare observation"""
         start_prepare = time.perf_counter()
         observation: Observation = raw_observation_to_observation(
@@ -381,7 +515,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # Ensure policy is in eval mode before inference
         self.policy.eval()
         
-        action_tensor = self._get_action_chunk(observation)
+        action_tensor = self._get_action_chunk(observation, precomputed_data)
         inference_time = time.perf_counter() - start_inference
         self.logger.info(
             f"Preprocessing and inference took {inference_time:.4f}s, action shape: {action_tensor.shape}"
