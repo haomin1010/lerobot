@@ -613,6 +613,13 @@ class SimClient:
         
         return obs, info
 
+    def _get_last_action_timestep(self) -> int:
+        """Get the timestep of the last action in the queue"""
+        with self.action_queue_lock:
+            if self.action_queue.qsize() > 0:
+                return list(self.action_queue.queue)[-1].get_timestep()
+            return -1
+
     def control_loop(self, task: str, verbose: bool = False):
         """Combined function for executing actions and streaming observations in simulation."""
         # Wait at barrier for synchronized start
@@ -625,7 +632,7 @@ class SimClient:
         episode_count = 0
         step_count = 0
         steps_since_last_request = 0  # Track steps for periodic requests
-        allow_send = True
+        last_send_action_timestep = -1
         # Get max steps from environment config
         max_steps = getattr(self.config.env, 'episode_length', None)
         pbar = None
@@ -640,10 +647,11 @@ class SimClient:
             )
             print("steps_since_last_request=", steps_since_last_request)
             # (1) Send observation if ready (based on queue size or periodic trigger)
-            if allow_send and (periodic_request_needed or self.action_queue.qsize() <= 0):
+            now_action_timestep = self._get_last_action_timestep()
+            if now_action_timestep > last_send_action_timestep and (periodic_request_needed or self.action_queue.qsize() <= 0):
                 print(periodic_request_needed)
                 self.control_loop_observation(obs, task, verbose)
-                allow_send = False
+                last_send_action_timestep = now_action_timestep
                 if periodic_request_needed:
                     steps_since_last_request = 0  # Reset counter after request
                     self.logger.debug(
@@ -679,7 +687,9 @@ class SimClient:
                 if episode_done:
                     episode_count += 1
                     self.episode_rewards.append(self.current_episode_reward)
-                    
+
+                    last_send_action_timestep = -1
+
                     # Check if the episode was successful
                     is_success = bool(info.get("is_success", False))  # Convert numpy bool to Python bool
                     self.episode_successes.append(is_success)
