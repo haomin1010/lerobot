@@ -58,7 +58,9 @@ from lerobot.transport import (
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 
-from ..async_inference.helpers import (
+from .configs import SimClientConfig
+from .constants import SUPPORTED_ENVS
+from .helpers import (
     Action,
     FPSTracker,
     Observation,
@@ -69,8 +71,6 @@ from ..async_inference.helpers import (
     get_logger,
     visualize_action_queue_size,
 )
-from .configs import SimClientConfig
-from .constants import SUPPORTED_ENVS
 
 
 def _env_obs_to_lerobot_features(env_config) -> dict[str, dict]:

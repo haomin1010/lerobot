@@ -126,8 +126,14 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         policy_specs = pickle.loads(request.data)  # nosec
 
-        if not isinstance(policy_specs, RemotePolicyConfig):
-            raise TypeError(f"Policy specs must be a RemotePolicyConfig. Got {type(policy_specs)}")
+        # Check if policy_specs has the required attributes (duck typing)
+        # This allows RemotePolicyConfig from different modules to work
+        required_attrs = ['policy_type', 'pretrained_name_or_path', 'lerobot_features', 'actions_per_chunk', 'device']
+        if not all(hasattr(policy_specs, attr) for attr in required_attrs):
+            raise TypeError(
+                f"Policy specs must have attributes: {required_attrs}. "
+                f"Got {type(policy_specs)} with attributes: {dir(policy_specs)}"
+            )
 
         if policy_specs.policy_type not in SUPPORTED_POLICIES:
             raise ValueError(
