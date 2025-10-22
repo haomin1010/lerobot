@@ -418,8 +418,7 @@ class SimClient:
                         f"Deserialization time: {deserialize_time * 1000:.2f}ms"
                     )
 
-                    self.latest_timestep = incoming_timesteps[-1]
-
+                self.latest_timestep = timed_actions[-1].get_timestep()
                 # Update action queue
                 start_time = time.perf_counter()
                 self._aggregate_action_queues(timed_actions, self.config.aggregate_fn)
