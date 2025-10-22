@@ -39,7 +39,7 @@ echo ""
 # 配置参数
 HOST=${HOST:-"127.0.0.1"}
 PORT=${PORT:-"8080"}
-FPS=${FPS:-"30"}
+FPS=${FPS:-"5"}
 ENV_TYPE=${ENV_TYPE:-"libero"}
 ENV_TASK=${ENV_TASK:-"libero_object"}
 POLICY_TYPE=${POLICY_TYPE:-"smolvla"}

@@ -62,7 +62,7 @@ class SimClientConfig:
     # Number of actions to actually use from the received chunk (rest are discarded)
     # For example, if server sends 50 actions but we use 20, the remaining 30 are discarded
     max_actions_to_use: int = field(
-        default=20,
+        default=50,
         metadata={"help": "Maximum number of actions to use from each chunk (default: 20, rest discarded)"}
     )
     
