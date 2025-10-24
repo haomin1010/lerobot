@@ -69,6 +69,63 @@ from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LAN
 from lerobot.utils.utils import get_safe_dtype
 
 
+def vicreg_loss(z1, z2, lambda_param=25.0, mu_param=25.0, nu_param=1.0, gamma=1.0, eps=1e-4):
+    """VICReg loss with Variance-Invariance-Covariance Regularization.
+    
+    Args:
+        z1: First representation [batch, num_tokens, dim]
+        z2: Second representation [batch, num_tokens, dim]
+        lambda_param: Weight for invariance loss (default: 25.0)
+        mu_param: Weight for variance loss (default: 25.0)
+        nu_param: Weight for covariance loss (default: 1.0)
+        gamma: Target standard deviation (default: 1.0)
+        eps: Small constant for numerical stability
+        
+    Returns:
+        VICReg loss value [batch, num_tokens]
+    """
+    batch_size, num_tokens, dim = z1.shape
+
+    invariance_loss = torch.mean(torch.square(z1 - z2), dim=-1)  # [batch, num_tokens]
+
+    variance_losses = []
+    covariance_losses = []
+
+    for i in range(num_tokens):
+        z1_i = z1[:, i, :]
+        z2_i = z2[:, i, :]
+
+        std_z1 = torch.sqrt(torch.var(z1_i, dim=0) + eps)
+        std_z2 = torch.sqrt(torch.var(z2_i, dim=0) + eps)
+
+        var_loss = torch.mean(F.relu(gamma - std_z1)) + torch.mean(F.relu(gamma - std_z2))
+        variance_losses.append(var_loss)
+
+        z1_centered = z1_i - torch.mean(z1_i, dim=0, keepdim=True)
+        z2_centered = z2_i - torch.mean(z2_i, dim=0, keepdim=True)
+
+        cov_z1 = (z1_centered.T @ z1_centered) / (batch_size - 1)
+        cov_z2 = (z2_centered.T @ z2_centered) / (batch_size - 1)
+
+        off_diagonal_mask = 1 - torch.eye(dim, device=z1.device)
+        cov_loss = (
+                       torch.sum(torch.square(cov_z1 * off_diagonal_mask)) +
+                       torch.sum(torch.square(cov_z2 * off_diagonal_mask))
+                   ) / dim
+        covariance_losses.append(cov_loss)
+
+    variance_loss = torch.stack(variance_losses)
+    covariance_loss = torch.stack(covariance_losses)
+
+    total_loss = (
+            lambda_param * invariance_loss +
+            mu_param * variance_loss[None, :] +
+            nu_param * covariance_loss[None, :]
+    )
+
+    return total_loss
+
+
 def create_sinusoidal_pos_embedding(
     time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
 ) -> Tensor:
@@ -120,6 +177,54 @@ def make_att_2d_masks(pad_masks, att_masks):
     att_2d_masks = cumsum[:, None, :] <= cumsum[:, :, None]
     pad_2d_masks = pad_masks[:, None, :] * pad_masks[:, :, None]
     att_2d_masks = att_2d_masks & pad_2d_masks
+    return att_2d_masks
+
+
+def make_att_2d_masks_with_cls(pad_masks, att_masks, num_cls_prefix=2, num_cls_suffix=2, 
+                                 num_action_context=5):
+    """Extended attention mask function with special handling for CLS tokens.
+    
+    This function creates attention masks with special behavior for CLS tokens:
+    - Prefix CLS tokens (first num_cls_prefix tokens): can attend to all prefix tokens
+    - Suffix CLS tokens (last num_cls_suffix tokens): can attend to first/last n action tokens
+    
+    Args:
+        pad_masks: bool[B, N] - true if valid token, false if padding
+        att_masks: int32[B, N] - autoregressive mask (1=causal, 0=bidirectional)
+        num_cls_prefix: Number of CLS tokens at the beginning
+        num_cls_suffix: Number of CLS tokens at the end
+        num_action_context: Number of action tokens the suffix CLS can attend to (from both ends)
+    
+    Returns:
+        att_2d_masks: bool[B, N, N] - 2D attention mask
+    """
+    if att_masks.ndim != 2:
+        raise ValueError(att_masks.ndim)
+    if pad_masks.ndim != 2:
+        raise ValueError(pad_masks.ndim)
+
+    # Standard attention mask computation
+    cumsum = torch.cumsum(att_masks, dim=1)
+    att_2d_masks = cumsum[:, None, :] <= cumsum[:, :, None]
+    pad_2d_masks = pad_masks[:, None, :] * pad_masks[:, :, None]
+    att_2d_masks = att_2d_masks & pad_2d_masks
+    
+    # Special handling for suffix CLS tokens
+    # The last num_cls_suffix tokens should attend to:
+    # 1. First num_action_context action tokens (in the suffix part)
+    # 2. Last num_action_context action tokens (just before CLS tokens)
+    if num_cls_suffix > 0:
+        seq_len = att_2d_masks.shape[-1]
+        
+        # Allow suffix CLS tokens to attend to everything first
+        att_2d_masks[:, -num_cls_suffix:, :] = True
+        
+        # Then mask out middle action tokens (keep only first/last n)
+        # This assumes the action tokens are before the CLS tokens
+        # Find where suffix starts (this is approximate, may need adjustment based on actual layout)
+        # For now, allow full attention for suffix CLS - can be customized later
+        pass
+    
     return att_2d_masks
 
 
@@ -246,6 +351,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
+        # Store previous obs_cls_out for similarity comparison
+        # Shape: (batch_size, num_cls_prefix, hidden_dim)
+        self._prev_obs_cls_out = None
 
     def _freeze_for_delta_expert_training(self):
         """Freeze all parameters except delta_expert and its related projections."""
@@ -288,7 +396,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
     def _get_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache=False,
                          past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None,
-                         action_context: Tensor | None = None) -> Tensor | tuple:
+                         action_context: Tensor | None = None, compute_cls_similarity=False) -> Tensor | tuple:
         # TODO: Check if this for loop is needed.
         # Context: In fact, self.queues contains only ACTION field, and in inference, we don't have action in the batch
         # In the case of offline inference, we have the action in the batch
@@ -306,14 +414,31 @@ class SmolVLAPolicy(PreTrainedPolicy):
         result = self.model.sample_actions(
             images, img_masks, lang_tokens, lang_masks, state, noise=noise,
             cal_cache=cal_cache, past_key_values=past_key_values, prefix_pad_masks=prefix_pad_masks,
-            initial_x_t=initial_x_t, initial_time=initial_time, action_context=action_context
+            initial_x_t=initial_x_t, initial_time=initial_time, action_context=action_context,
+            prev_obs_cls_out=self._prev_obs_cls_out, compute_cls_similarity=compute_cls_similarity
         )
         
-        # If cal_cache=True, result is (past_key_values, prefix_pad_masks)
+        # If cal_cache=True, result is (past_key_values, prefix_pad_masks, delta_actions)
         if cal_cache:
             return result  # Return tuple directly
         
-        # Otherwise result is actions
+        # If compute_cls_similarity=True, result is (actions, obs_cls_out, should_cache)
+        if compute_cls_similarity and self.config.use_cls_head:
+            actions, obs_cls_out, should_cache = result
+            
+            # Update stored obs_cls_out for next round
+            self._prev_obs_cls_out = obs_cls_out.detach()
+            
+            # Unpad actions
+            original_action_dim = self.config.action_feature.shape[0]
+            actions = actions[:, :, :original_action_dim]
+
+            if self.config.adapt_to_pi_aloha:
+                actions = self._pi_aloha_encode_actions(actions)
+
+            return actions, obs_cls_out, should_cache
+        
+        # Otherwise result is just actions
         actions = result
 
         # Unpad actions
@@ -334,7 +459,25 @@ class SmolVLAPolicy(PreTrainedPolicy):
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None, cal_cache: bool = False,
                            past_key_values=None, prefix_pad_masks=None, initial_x_t=None, initial_time=None,
-                           action_context: Tensor | None = None) -> Tensor | tuple:
+                           action_context: Tensor | None = None, compute_cls_similarity: bool = False) -> Tensor | tuple:
+        """Predict a chunk of actions.
+        
+        Args:
+            batch: Input batch
+            noise: Optional noise
+            cal_cache: If True, compute and return KV cache
+            past_key_values: Cached KV values
+            prefix_pad_masks: Cached prefix masks
+            initial_x_t: Initial x_t for continuing denoising
+            initial_time: Initial time
+            action_context: Action context from queue
+            compute_cls_similarity: If True, compute CLS similarity and return should_cache flag
+            
+        Returns:
+            If cal_cache=True: (past_key_values, prefix_pad_masks, delta_actions)
+            If compute_cls_similarity=True: (actions, obs_cls_out, should_cache)
+            Otherwise: actions
+        """
         self.eval()
 
         batch = self._prepare_batch(batch)
@@ -343,7 +486,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         result = self._get_action_chunk(
             batch, noise, cal_cache=cal_cache,
             past_key_values=past_key_values, prefix_pad_masks=prefix_pad_masks,
-            initial_x_t=initial_x_t, initial_time=initial_time, action_context=action_context
+            initial_x_t=initial_x_t, initial_time=initial_time, action_context=action_context,
+            compute_cls_similarity=compute_cls_similarity
         )
         return result
 
@@ -649,6 +793,45 @@ class VLAFlowMatching(nn.Module):
         self.add_image_special_tokens = self.config.add_image_special_tokens
         self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
         self.prefix_length = self.config.prefix_length
+        
+        # CLS head mechanism: learnable tokens for contrastive learning
+        # pre_cls_param: added at the beginning of prefix (image/language tokens)
+        # suf_cls_param: added at the end of suffix (action tokens)
+        if self.config.use_cls_head:
+            self.pre_cls_param = nn.Parameter(
+                torch.randn(1, self.config.num_cls_prefix, self.vlm_with_expert.config.text_config.hidden_size) * 0.02
+            )
+            self.suf_cls_param = nn.Parameter(
+                torch.randn(1, self.config.num_cls_suffix, self.vlm_with_expert.expert_hidden_size) * 0.02
+            )
+        else:
+            # Dummy parameters (not used)
+            self.register_buffer('pre_cls_param', torch.zeros(1, 2, self.vlm_with_expert.config.text_config.hidden_size))
+            self.register_buffer('suf_cls_param', torch.zeros(1, 2, self.vlm_with_expert.expert_hidden_size))
+        
+        # MLP projections for CLS tokens (only if CLS head is enabled)
+        if self.config.use_cls_head:
+            class MLP(nn.Module):
+                def __init__(self, in_dim, hidden_dim, out_dim):
+                    super().__init__()
+                    self.fc1 = nn.Linear(in_dim, hidden_dim)
+                    self.fc2 = nn.Linear(hidden_dim, out_dim)
+                    self.activation = nn.ReLU()
+                
+                def forward(self, x):
+                    x = self.activation(self.fc1(x))
+                    x = self.fc2(x)
+                    return x
+            
+            vlm_hidden_size = self.vlm_with_expert.config.text_config.hidden_size
+            expert_hidden_size = self.vlm_with_expert.expert_hidden_size
+            
+            self.obs_cls_proj = MLP(vlm_hidden_size, vlm_hidden_size, expert_hidden_size)
+            self.act_cls_proj = MLP(expert_hidden_size, vlm_hidden_size, expert_hidden_size)
+        else:
+            # Dummy modules (not used)
+            self.obs_cls_proj = nn.Identity()
+            self.act_cls_proj = nn.Identity()
 
     def set_requires_grad(self):
         for params in self.state_proj.parameters():
@@ -749,8 +932,24 @@ class VLAFlowMatching(nn.Module):
 
         # Set attention masks so that image and language inputs do not attend to state or actions
         att_masks += [1] * (states_seq_len)
+        
+        # Concatenate embeddings BEFORE adding CLS tokens
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
+        
+        # Add pre_cls_param tokens at the beginning (if enabled)
+        if self.config.use_cls_head:
+            pre_cls_tokens = self.pre_cls_param.expand(bsize, -1, -1)
+            embs = torch.cat([pre_cls_tokens, embs], dim=1)
+            
+            # Update masks for CLS tokens
+            # CLS tokens can attend to all image/language tokens (att_mask=0)
+            cls_att_masks = [0] * self.config.num_cls_prefix
+            att_masks = cls_att_masks + att_masks
+            
+            cls_pad_masks = torch.ones(bsize, self.config.num_cls_prefix, dtype=torch.bool, device=device)
+            pad_masks = torch.cat([cls_pad_masks, pad_masks], dim=1)
+        
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
         att_masks = att_masks[None, :]
 
@@ -879,10 +1078,11 @@ class VLAFlowMatching(nn.Module):
     def forward_delta_expert(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
     ) -> Tensor:
-        """Training forward pass for delta_expert.
+        """Training forward pass for delta_expert with VICReg loss.
         
-        This computes the loss for training delta_expert and learnable_noise.
-        The delta_expert learns to generate delta actions from the learnable noise.
+        This computes the loss for training delta_expert with CLS head mechanism.
+        The delta_expert learns to generate delta actions and the CLS tokens learn
+        contrastive representations.
         
         Args:
             images: Input images
@@ -895,20 +1095,20 @@ class VLAFlowMatching(nn.Module):
             time: Optional time (if None, uses fixed timestep)
             
         Returns:
-            losses: Per-element losses (batch_size x chunk_size x action_dim)
+            losses: Per-element losses (batch_size x chunk_size x action_dim) including VICReg loss
         """
         bsize = state.shape[0]
         device = state.device
         
-        # Compute prefix embeddings and KV cache
+        # Compute prefix embeddings (with CLS tokens) and get outputs
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state=state
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
         
-        # Compute image and language key value cache
-        _, past_key_values = self.vlm_with_expert.forward(
+        # Forward through VLM to get prefix outputs (including CLS tokens)
+        (prefix_out, _), past_key_values = self.vlm_with_expert.forward(
             attention_mask=prefix_att_2d_masks,
             position_ids=prefix_position_ids,
             past_key_values=None,
@@ -916,13 +1116,16 @@ class VLAFlowMatching(nn.Module):
             use_cache=True,
             fill_kv_cache=True,
         )
+        
+        # Extract prefix CLS tokens (first 2 tokens)
+        obs_cls_out = prefix_out[:, :2, :]  # [batch, 2, hidden_dim]
+        
+        # Denoise to get x_t using main expert
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
         initial_time_val = torch.tensor(1.0, dtype=torch.float32, device=device)
 
-        # Otherwise continue with full denoising
         if noise is None:
-            # Use zero tensor as default input for delta_expert training
             x_t = torch.zeros(bsize, self.config.chunk_size, self.config.max_action_dim, device=device)
         else:
             x_t = noise
@@ -935,35 +1138,87 @@ class VLAFlowMatching(nn.Module):
                 x_t,
                 expanded_time,
             )
-            # Euler step
             x_t += dt * v_t
             time += dt
-
         
         # Fixed timestep for delta expert
         timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
         
         # Add noise to x_t (only to non-padded dimensions)
-        x_t_noisy = self._add_noise_to_actions(x_t, noise_scale=0.01)
+        x_t_noisy = self._add_noise_to_actions(x_t, noise_scale=self.config.cls_noise_scale)
         
-        # Apply one denoising step using delta_expert
-        v_t = self.denoise_step_delta(
-            prefix_pad_masks,
-            past_key_values,
-            x_t_noisy,  # Use noisy version
-            timestep,
+        # Embed suffix with CLS tokens for delta expert
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix_delta(x_t_noisy, timestep)
+        
+        suffix_len = suffix_pad_masks.shape[1]
+        prefix_len = prefix_pad_masks.shape[1]
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(bsize, suffix_len, prefix_len)
+        
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+        
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        
+        # Forward through delta expert to get suffix outputs (including CLS tokens)
+        outputs_embeds, _ = self.vlm_with_expert.forward_delta(
+            attention_mask=full_att_2d_masks,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=[None, suffix_embs],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=False,
         )
+        suffix_out = outputs_embeds[1]
         
-        # Compute loss: predict the difference (x_t - x_t_noisy)
-        # This trains the model to denoise
+        # Extract action predictions (excluding CLS tokens at the end if enabled)
+        if self.config.use_cls_head:
+            action_out = suffix_out[:, -(self.config.chunk_size + self.config.num_cls_suffix):-self.config.num_cls_suffix]
+        else:
+            action_out = suffix_out[:, -self.config.chunk_size:]
+        action_out = action_out.to(dtype=torch.float32)
+        v_t = self.delta_action_out_proj(action_out)
+        
+        # Compute denoising loss
         target = x_t - x_t_noisy
-        losses = F.mse_loss(target, v_t, reduction="none")
+        denoising_losses = F.mse_loss(target, v_t, reduction="none")  # [batch, chunk_size, action_dim]
         
-        return losses
+        # Compute VICReg loss if CLS head is enabled
+        if self.config.use_cls_head:
+            # Extract prefix CLS tokens (first num_cls_prefix tokens)
+            obs_cls_out = prefix_out[:, :self.config.num_cls_prefix, :]  # [batch, num_cls_prefix, hidden_dim]
+            
+            # Extract suffix CLS tokens (last num_cls_suffix tokens)
+            act_cls_out = suffix_out[:, -self.config.num_cls_suffix:, :]  # [batch, num_cls_suffix, hidden_dim]
+            
+            # Project CLS tokens through MLPs
+            obs_cls_proj = self.obs_cls_proj(obs_cls_out)  # [batch, num_cls_prefix, expert_hidden_dim]
+            act_cls_proj = self.act_cls_proj(act_cls_out)  # [batch, num_cls_suffix, expert_hidden_dim]
+            
+            # Compute VICReg loss
+            vicreg = vicreg_loss(
+                obs_cls_proj,
+                act_cls_proj,
+                lambda_param=self.config.vicreg_lambda,
+                mu_param=self.config.vicreg_mu,
+                nu_param=self.config.vicreg_nu,
+            )
+            vicreg_mean = torch.mean(vicreg, dim=-1)  # [batch]
+            
+            # Combine losses: denoising loss + weighted VICReg loss
+            # The VICReg loss is scalar per batch, expand it to match denoising_losses shape
+            vicreg_loss_expanded = vicreg_mean[:, None, None].expand_as(denoising_losses)
+            total_losses = denoising_losses + self.config.vicreg_weight * vicreg_loss_expanded
+        else:
+            # No VICReg loss, only denoising loss
+            total_losses = denoising_losses
+        
+        return total_losses
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, 
                       cal_cache=False, past_key_values=None, prefix_pad_masks=None, 
-                      initial_x_t=None, initial_time=None, action_context=None) -> Tensor | tuple:
+                      initial_x_t=None, initial_time=None, action_context=None,
+                      prev_obs_cls_out=None, compute_cls_similarity=False) -> Tensor | tuple:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)
         
         Args:
@@ -980,10 +1235,13 @@ class VLAFlowMatching(nn.Module):
             initial_time: Initial time value for continuing denoising
             action_context: Action context from queue (batch_size, num_actions, action_dim)
                           Used to generate delta_actions when cal_cache=True
+            prev_obs_cls_out: Previous observation CLS tokens for similarity comparison
+                            Shape: (batch_size, num_cls_prefix, hidden_dim)
+            compute_cls_similarity: If True, compute and return CLS similarity and cache decision
             
         Returns:
             If cal_cache=True: tuple of (past_key_values, prefix_pad_masks, delta_actions)
-            If continuing from cached state (past_key_values is not None): final actions (x_t)
+            If compute_cls_similarity=True: tuple of (actions, obs_cls_out, should_cache)
             Otherwise: final actions (x_t)
         """
         bsize = state.shape[0]
@@ -993,6 +1251,10 @@ class VLAFlowMatching(nn.Module):
             actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
 
+        # Variables to store CLS outputs for similarity computation
+        obs_cls_out = None
+        should_cache = True  # Default: cache KV values
+        
         # If we have cached values, skip prefix computation and go straight to denoising
         if past_key_values is None or prefix_pad_masks is None:
             # Normal flow: compute prefix embeddings and KV cache
@@ -1001,15 +1263,52 @@ class VLAFlowMatching(nn.Module):
             )
             prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
             prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+            
             # Compute image and language key value cache
-            _, past_key_values = self.vlm_with_expert.forward(
-                attention_mask=prefix_att_2d_masks,
-                position_ids=prefix_position_ids,
-                past_key_values=None,
-                inputs_embeds=[prefix_embs, None],
-                use_cache=self.config.use_cache,
-                fill_kv_cache=True,
-            )
+            # Get prefix outputs if CLS head is enabled
+            if self.config.use_cls_head:
+                (prefix_out, _), past_key_values = self.vlm_with_expert.forward(
+                    attention_mask=prefix_att_2d_masks,
+                    position_ids=prefix_position_ids,
+                    past_key_values=None,
+                    inputs_embeds=[prefix_embs, None],
+                    use_cache=self.config.use_cache,
+                    fill_kv_cache=True,
+                )
+                # Extract prefix CLS tokens
+                obs_cls_out = prefix_out[:, :self.config.num_cls_prefix, :]  # [batch, num_cls_prefix, hidden_dim]
+                
+                # Compute similarity with previous obs_cls_out if requested
+                if compute_cls_similarity and prev_obs_cls_out is not None:
+                    # Use obs_cls_out[0] (first CLS token of current round)
+                    # and prev_obs_cls_out[1] (second CLS token of previous round)
+                    current_cls = obs_cls_out[:, 0, :]  # [batch, hidden_dim]
+                    prev_cls = prev_obs_cls_out[:, 1, :]  # [batch, hidden_dim]
+                    
+                    # Compute cosine similarity
+                    # Normalize vectors
+                    current_cls_norm = F.normalize(current_cls, p=2, dim=-1)
+                    prev_cls_norm = F.normalize(prev_cls, p=2, dim=-1)
+                    
+                    # Compute similarity for each sample in batch
+                    similarity = torch.sum(current_cls_norm * prev_cls_norm, dim=-1)  # [batch]
+                    
+                    # Average across batch
+                    avg_similarity = torch.mean(similarity)
+                    
+                    # Decide whether to cache based on similarity threshold
+                    # If similarity > threshold, the scene hasn't changed much, so cache
+                    # If similarity <= threshold, scene has changed, don't cache (force recompute)
+                    should_cache = avg_similarity.item() > self.config.cls_similarity_threshold
+            else:
+                _, past_key_values = self.vlm_with_expert.forward(
+                    attention_mask=prefix_att_2d_masks,
+                    position_ids=prefix_position_ids,
+                    past_key_values=None,
+                    inputs_embeds=[prefix_embs, None],
+                    use_cache=self.config.use_cache,
+                    fill_kv_cache=True,
+                )
 
             # If cal_cache, generate delta_actions and return cache
             if cal_cache:
@@ -1036,6 +1335,10 @@ class VLAFlowMatching(nn.Module):
             # Euler step
             x_t += dt * v_t
             time += dt
+        
+        # Return based on what was requested
+        if compute_cls_similarity and self.config.use_cls_head:
+            return x_t, obs_cls_out, should_cache
         return x_t
 
     def denoise_step(
@@ -1110,8 +1413,24 @@ class VLAFlowMatching(nn.Module):
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
         att_masks += [1] * self.config.chunk_size
+        
+        # Concatenate embeddings BEFORE adding CLS tokens
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
+        
+        # Add suf_cls_param tokens at the end (if enabled)
+        if self.config.use_cls_head:
+            suf_cls_tokens = self.suf_cls_param.expand(bsize, -1, -1)
+            embs = torch.cat([embs, suf_cls_tokens], dim=1)
+            
+            # Update masks for suffix CLS tokens
+            # These CLS tokens should have special attention pattern (described below)
+            cls_suf_att_masks = [1] * self.config.num_cls_suffix  # First set to 1 (will customize in make_att_2d_masks_with_cls)
+            att_masks = att_masks + cls_suf_att_masks
+            
+            cls_suf_pad_masks = torch.ones(bsize, self.config.num_cls_suffix, dtype=torch.bool, device=device)
+            pad_masks = torch.cat([pad_masks, cls_suf_pad_masks], dim=1)
+        
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
         return embs, pad_masks, att_masks

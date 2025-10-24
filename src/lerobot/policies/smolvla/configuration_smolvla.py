@@ -74,6 +74,17 @@ class SmolVLAConfig(PreTrainedConfig):
     
     # Delta expert training settings
     train_delta_expert: bool = False  # If True, only train delta_expert and its projections
+    
+    # CLS head settings (for contrastive learning with VICReg loss)
+    use_cls_head: bool = False  # Enable CLS head mechanism
+    num_cls_prefix: int = 2  # Number of CLS tokens at the beginning of prefix
+    num_cls_suffix: int = 2  # Number of CLS tokens at the end of suffix
+    vicreg_weight: float = 0.01  # Weight for VICReg loss in delta_expert training
+    vicreg_lambda: float = 25.0  # Weight for invariance loss in VICReg
+    vicreg_mu: float = 25.0  # Weight for variance loss in VICReg
+    vicreg_nu: float = 1.0  # Weight for covariance loss in VICReg
+    cls_noise_scale: float = 0.01  # Scale of noise added to actions in delta_expert training
+    cls_similarity_threshold: float = 0.5  # Threshold for CLS similarity to decide caching (0.0-1.0)
 
     # Training presets
     optimizer_lr: float = 1e-4
