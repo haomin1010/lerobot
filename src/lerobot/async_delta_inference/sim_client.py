@@ -320,10 +320,15 @@ class SimClient:
             return False
 
     def _add_actions_to_queue(self, incoming_actions: list[TimedAction]):
-        """Add incoming actions to the queue, summing with existing actions at the same timestep.
+        """Add incoming actions to the queue, optionally summing with existing actions at the same timestep.
+        
+        Behavior depends on config.sum_delta_actions:
+        - If True: Sum delta_actions with existing actions at the same timestep (element-wise sum)
+        - If False: Replace existing actions with new ones (no summing)
         
         For actions with the same timestep:
-        - If action already exists in queue, add the new action to it (element-wise sum)
+        - If action already exists in queue and sum_delta_actions=True, add the new action to it
+        - If action already exists in queue and sum_delta_actions=False, replace it
         - If action doesn't exist in queue, add it directly
         """
         with self.action_queue_lock:
@@ -335,17 +340,22 @@ class SimClient:
                 timestep = new_action.get_timestep()
                 
                 if timestep in existing_actions:
-                    # Sum actions at the same timestep
-                    old_action = existing_actions[timestep]
-                    summed_action_tensor = old_action.get_action() + new_action.get_action()
-                    
-                    # Update the action in the dict
-                    existing_actions[timestep] = TimedAction(
-                        timestamp=new_action.get_timestamp(),  # Use newer timestamp
-                        timestep=timestep,
-                        action=summed_action_tensor
-                    )
-                    self.logger.debug(f"Summed action at timestep #{timestep}")
+                    if self.config.sum_delta_actions:
+                        # Sum actions at the same timestep
+                        old_action = existing_actions[timestep]
+                        summed_action_tensor = old_action.get_action() + new_action.get_action()
+                        
+                        # Update the action in the dict
+                        existing_actions[timestep] = TimedAction(
+                            timestamp=new_action.get_timestamp(),  # Use newer timestamp
+                            timestep=timestep,
+                            action=summed_action_tensor
+                        )
+                        self.logger.debug(f"Summed delta_action at timestep #{timestep}")
+                    else:
+                        # Replace action directly (no summing)
+                        existing_actions[timestep] = new_action
+                        self.logger.debug(f"Replaced action at timestep #{timestep} (no summing)")
                 else:
                     # Add new action
                     existing_actions[timestep] = new_action

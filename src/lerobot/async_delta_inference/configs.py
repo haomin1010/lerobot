@@ -143,6 +143,12 @@ class SimClientConfig:
         default=10,
         metadata={"help": "Request new actions every N steps (None to disable, triggers regardless of queue size)"}
     )
+    
+    # Whether to sum delta_actions with existing actions (True) or replace them (False)
+    sum_delta_actions: bool = field(
+        default=True,
+        metadata={"help": "If True, sum delta_actions with existing actions; if False, replace directly"}
+    )
 
     # Task instruction for the simulation to execute (e.g., 'fold my tshirt')
     task: str = field(default="", metadata={"help": "Task instruction for the simulation to execute"})
@@ -243,6 +249,7 @@ class SimClientConfig:
             "seed": self.seed,
             "max_actions_to_use": self.max_actions_to_use,
             "replace_actions_on_new": self.replace_actions_on_new,
+            "sum_delta_actions": self.sum_delta_actions,
             "save_videos": self.save_videos,
             "max_episodes_rendered": self.max_episodes_rendered,
             "videos_dir": self.videos_dir,
