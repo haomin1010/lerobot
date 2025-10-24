@@ -352,10 +352,10 @@ class SimClient:
                             action=summed_action_tensor
                         )
                         self.logger.debug(f"Summed delta_action at timestep #{timestep}")
-                    else:
-                        # Replace action directly (no summing)
-                        existing_actions[timestep] = new_action
-                        self.logger.debug(f"Replaced action at timestep #{timestep} (no summing)")
+                    # else:
+                    #     # Replace action directly (no summing)
+                    #     existing_actions[timestep] = new_action
+                    #     self.logger.debug(f"Replaced action at timestep #{timestep} (no summing)")
                 else:
                     # Add new action
                     existing_actions[timestep] = new_action
