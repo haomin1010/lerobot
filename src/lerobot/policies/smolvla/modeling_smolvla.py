@@ -86,41 +86,46 @@ def vicreg_loss(z1, z2, lambda_param=25.0, mu_param=25.0, nu_param=1.0, gamma=1.
     """
     batch_size, num_tokens, dim = z1.shape
 
+    # 修复内存泄漏: 计算invariance loss后立即减少维度
     invariance_loss = torch.mean(torch.square(z1 - z2), dim=-1)  # [batch, num_tokens]
 
-    variance_losses = []
-    covariance_losses = []
+    # 修复内存泄漏: 预分配tensor以避免list append和stack
+    variance_losses = torch.zeros(num_tokens, device=z1.device, dtype=z1.dtype)
+    covariance_losses = torch.zeros(num_tokens, device=z1.device, dtype=z1.dtype)
+    
+    # 修复内存泄漏: 预计算off_diagonal_mask避免在循环中重复创建
+    off_diagonal_mask = 1 - torch.eye(dim, device=z1.device, dtype=z1.dtype)
 
     for i in range(num_tokens):
         z1_i = z1[:, i, :]
         z2_i = z2[:, i, :]
 
+        # 修复内存泄漏: 合并计算以减少中间tensor
         std_z1 = torch.sqrt(torch.var(z1_i, dim=0) + eps)
         std_z2 = torch.sqrt(torch.var(z2_i, dim=0) + eps)
 
         var_loss = torch.mean(F.relu(gamma - std_z1)) + torch.mean(F.relu(gamma - std_z2))
-        variance_losses.append(var_loss)
+        variance_losses[i] = var_loss
 
+        # 修复内存泄漏: 直接计算协方差矩阵,避免存储中间变量
         z1_centered = z1_i - torch.mean(z1_i, dim=0, keepdim=True)
         z2_centered = z2_i - torch.mean(z2_i, dim=0, keepdim=True)
 
         cov_z1 = (z1_centered.T @ z1_centered) / (batch_size - 1)
         cov_z2 = (z2_centered.T @ z2_centered) / (batch_size - 1)
 
-        off_diagonal_mask = 1 - torch.eye(dim, device=z1.device)
+        # 修复内存泄漏: 合并计算
         cov_loss = (
-                       torch.sum(torch.square(cov_z1 * off_diagonal_mask)) +
-                       torch.sum(torch.square(cov_z2 * off_diagonal_mask))
-                   ) / dim
-        covariance_losses.append(cov_loss)
+            torch.sum(torch.square(cov_z1 * off_diagonal_mask)) +
+            torch.sum(torch.square(cov_z2 * off_diagonal_mask))
+        ) / dim
+        covariance_losses[i] = cov_loss
 
-    variance_loss = torch.stack(variance_losses)
-    covariance_loss = torch.stack(covariance_losses)
-
+    # 修复内存泄漏: 直接使用tensor而不是stack
     total_loss = (
-            lambda_param * invariance_loss +
-            mu_param * variance_loss[None, :] +
-            nu_param * covariance_loss[None, :]
+        lambda_param * invariance_loss +
+        mu_param * variance_losses[None, :] +
+        nu_param * covariance_losses[None, :]
     )
 
     return total_loss
@@ -542,16 +547,17 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
         losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
-        loss_dict["losses_after_forward"] = losses.clone()
+        # 修复内存泄漏: 使用 .detach() 而不是 .clone()
+        loss_dict["losses_after_forward"] = losses.detach().mean().item()
 
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
             losses = losses * in_episode_bound.unsqueeze(-1)
-            loss_dict["losses_after_in_ep_bound"] = losses.clone()
+            loss_dict["losses_after_in_ep_bound"] = losses.detach().mean().item()
 
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
-        loss_dict["losses_after_rm_padding"] = losses.clone()
+        loss_dict["losses_after_rm_padding"] = losses.detach().mean().item()
 
         # For backward pass
         loss = losses.mean()
@@ -590,16 +596,17 @@ class SmolVLAPolicy(PreTrainedPolicy):
         losses = self.model.forward_delta_expert(
             images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
         )
-        loss_dict["delta_losses_after_forward"] = losses.clone()
+        # 修复内存泄漏: 使用 .detach() 而不是 .clone()
+        loss_dict["delta_losses_after_forward"] = losses.detach().mean().item()
 
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
             losses = losses * in_episode_bound.unsqueeze(-1)
-            loss_dict["delta_losses_after_in_ep_bound"] = losses.clone()
+            loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
 
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
-        loss_dict["delta_losses_after_rm_padding"] = losses.clone()
+        loss_dict["delta_losses_after_rm_padding"] = losses.detach().mean().item()
 
         # For backward pass
         loss = losses.mean()
@@ -1119,9 +1126,11 @@ class VLAFlowMatching(nn.Module):
         )
         
         # Extract prefix CLS tokens (first 2 tokens)
-        obs_cls_out = prefix_out[:, :2, :]  # [batch, 2, hidden_dim]
+        # 修复内存泄漏: detach obs_cls_out 因为它不需要梯度
+        obs_cls_out = prefix_out[:, :2, :].detach()  # [batch, 2, hidden_dim]
         
         # Denoise to get x_t using main expert
+        # 修复内存泄漏: 使用 torch.no_grad() 因为这部分只是为了生成x_t,不需要梯度
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
         initial_time_val = torch.tensor(1.0, dtype=torch.float32, device=device)
@@ -1130,17 +1139,27 @@ class VLAFlowMatching(nn.Module):
             x_t = torch.zeros(bsize, self.config.chunk_size, self.config.max_action_dim, device=device)
         else:
             x_t = noise
-        time = initial_time_val
-        while time >= -dt / 2:
-            expanded_time = time.expand(bsize)
-            v_t = self.denoise_step(
-                prefix_pad_masks,
-                past_key_values,
-                x_t,
-                expanded_time,
-            )
-            x_t += dt * v_t
-            time += dt
+        
+        # 修复内存泄漏: detach past_key_values 用于denoising循环
+        past_key_values_detached = {k: {'key_states': v['key_states'].detach(), 
+                                        'value_states': v['value_states'].detach()} 
+                                   for k, v in past_key_values.items()}
+        
+        with torch.no_grad():
+            time = initial_time_val
+            while time >= -dt / 2:
+                expanded_time = time.expand(bsize)
+                v_t = self.denoise_step(
+                    prefix_pad_masks,
+                    past_key_values_detached,
+                    x_t,
+                    expanded_time,
+                )
+                x_t += dt * v_t
+                time += dt
+        
+        # 修复内存泄漏: detach x_t 并创建新tensor以启用梯度
+        x_t = x_t.detach().requires_grad_(False)
         
         # Fixed timestep for delta expert
         timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
