@@ -1052,7 +1052,7 @@ class VLAFlowMatching(nn.Module):
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
-    def _add_noise_to_actions(self, x_t: torch.Tensor, noise_scale: float = 0.01) -> torch.Tensor:
+    def _add_noise_to_actions(self, x_t: torch.Tensor, noise_scale: float = 0.1) -> torch.Tensor:
         """Add noise to x_t, only to the non-padded dimensions.
         
         Args:
