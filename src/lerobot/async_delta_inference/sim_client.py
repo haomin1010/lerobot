@@ -223,6 +223,10 @@ class SimClient:
         # Periodic request tracking (thread-safe)
         self.steps_since_last_request = 0
         self.steps_since_last_request_lock = threading.Lock()
+        
+        # Store executed actions for comparison with newly received actions
+        self.executed_actions = {}  # {timestep: action_tensor}
+        self.executed_actions_lock = threading.Lock()
 
 
     @property
@@ -361,6 +365,42 @@ class SimClient:
             timestamps = sorted([action.get_timestep() for action in self.action_queue.queue])
         self.logger.debug(f"Queue size: {queue_size}, Queue contents: {timestamps}")
         return queue_size, timestamps
+    
+    def _compare_actions_with_executed(self, incoming_actions: list[TimedAction]):
+        """Compare incoming actions with already executed actions at the same timestep.
+        
+        This is used to measure prediction consistency - if the same timestep is predicted
+        multiple times, how different are the predictions?
+        
+        Args:
+            incoming_actions: List of newly received actions from the server
+        """
+        with self.executed_actions_lock:
+            for action in incoming_actions:
+                timestep = action.get_timestep()
+                
+                # Check if this timestep was already executed
+                if timestep in self.executed_actions:
+                    executed_action = self.executed_actions[timestep]
+                    new_action = action.get_action()
+                    
+                    # Convert to numpy if needed
+                    if isinstance(executed_action, torch.Tensor):
+                        executed_action_np = executed_action.cpu().numpy()
+                    else:
+                        executed_action_np = executed_action
+                    
+                    if isinstance(new_action, torch.Tensor):
+                        new_action_np = new_action.cpu().numpy()
+                    else:
+                        new_action_np = new_action
+                    
+                    # Calculate gap: mean of absolute differences across all dimensions
+                    actions_gap = np.mean(np.abs(executed_action_np - new_action_np))
+                    
+                    self.logger.info(
+                        f"[Action Comparison] timestep={timestep}, actions_gap={actions_gap:.6f}"
+                    )
 
     def _aggregate_action_queues(
         self,
@@ -471,6 +511,9 @@ class SimClient:
                         f"Network latency (server->client): {server_to_client_latency:.2f}ms | "
                         f"Deserialization time: {deserialize_time * 1000:.2f}ms"
                     )
+                
+                # Compare incoming actions with executed actions
+                self._compare_actions_with_executed(timed_actions)
 
                 # Update action queue
                 start_time = time.perf_counter()
@@ -561,6 +604,10 @@ class SimClient:
 
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
+        
+        # Store executed action for later comparison
+        with self.executed_actions_lock:
+            self.executed_actions[timed_action.get_timestep()] = timed_action.get_action().clone()
 
         if verbose:
             with self.action_queue_lock:
@@ -706,6 +753,10 @@ class SimClient:
         
         # Set must_go flag to ensure first observation is processed
         self.must_go.set()
+        
+        # Clear executed actions for new episode
+        with self.executed_actions_lock:
+            self.executed_actions.clear()
         
         self.logger.debug("Environment and action state reset for new episode")
         
