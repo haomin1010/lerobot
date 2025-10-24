@@ -73,6 +73,7 @@ python -m lerobot.async_delta_inference.sim_client \
     --aggregate_fn_name=weighted_average \
     --n_episodes=$N_EPISODES \
     --fps=$FPS \
+    --sum_delta_actions=false \
     --server_address=$HOST:$PORT
 
 echo ""
