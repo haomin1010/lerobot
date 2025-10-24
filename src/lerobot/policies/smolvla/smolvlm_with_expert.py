@@ -63,6 +63,7 @@ class SmolVLMWithExpertModel(nn.Module):
         self,
         model_id: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
         load_vlm_weights: bool = True,
+        load_expert_weights: bool = False,
         train_expert_only: bool = True,
         freeze_vision_encoder: bool = False,
         attention_mode: str = "self_attn",
@@ -105,6 +106,35 @@ class SmolVLMWithExpertModel(nn.Module):
         
         # Delta expert with the same architecture as lm_expert
         self.delta_expert = AutoModel.from_config(lm_expert_config)
+        
+        # Load expert weights if requested
+        if load_expert_weights:
+            print(f"Loading expert weights from {model_id} ...")
+            try:
+                # Try to load expert weights from the same model_id
+                expert_state_dict = AutoModelForImageTextToText.from_pretrained(
+                    model_id,
+                    device_map="auto",  # Load to CPU first to avoid memory issues
+                    torch_dtype="bfloat16",
+                    low_cpu_mem_usage=True,
+                ).state_dict()
+                
+                # Extract expert-related weights (this is a simplified approach)
+                # In practice, you might need to map the weights more carefully
+                lm_expert_state_dict = {}
+                
+                for key, value in expert_state_dict.items():
+                    if "lm_expert" in key:
+                        lm_expert_state_dict[key.replace("lm_expert.", "")] = value
+                
+                # Load weights if found
+                if lm_expert_state_dict:
+                    self.lm_expert.load_state_dict(lm_expert_state_dict, strict=False)
+                    print("Loaded lm_expert weights")
+                    
+            except Exception as e:
+                print(f"Warning: Could not load expert weights from {model_id}: {e}")
+                print("Continuing with randomly initialized expert weights")
 
         self.num_expert_layers = len(self.lm_expert.layers)
         self.self_attn_every_n_layers = self_attn_every_n_layers

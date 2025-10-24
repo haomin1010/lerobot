@@ -745,6 +745,7 @@ class VLAFlowMatching(nn.Module):
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
             load_vlm_weights=self.config.load_vlm_weights,
+            load_expert_weights=self.config.load_expert_weights,
             attention_mode=self.config.attention_mode,
             num_expert_layers=self.config.num_expert_layers,
             num_vlm_layers=self.config.num_vlm_layers,

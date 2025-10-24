@@ -99,6 +99,7 @@ class SmolVLAConfig(PreTrainedConfig):
 
     vlm_model_name: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"  # Select the VLM backbone.
     load_vlm_weights: bool = False  # Set to True in case of training the expert from scratch. True when init from pretrained SmolVLA weights
+    load_expert_weights: bool = False  # Set to True to load pretrained expert weights during training
 
     add_image_special_tokens: bool = False  # Whether to use special image tokens around image features.
 
