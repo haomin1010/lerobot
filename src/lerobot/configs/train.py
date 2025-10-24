@@ -52,6 +52,9 @@ class TrainPipelineConfig(HubMixin):
     seed: int | None = 1000
     # Number of workers for the dataloader.
     num_workers: int = 4
+    # Number of batches each worker pre-loads. Higher values reduce GPU waiting but increase memory usage.
+    # Recommended: 2-4 for systems with limited RAM, 4-8 for high-RAM systems with video data.
+    prefetch_factor: int = 2
     batch_size: int = 8
     steps: int = 100_000
     eval_freq: int = 20_000
