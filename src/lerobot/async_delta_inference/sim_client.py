@@ -341,6 +341,11 @@ class SimClient:
                 
                 if timestep in existing_actions:
                     if self.config.sum_delta_actions:
+                        print("11111111111111")
+                        print(timestep)
+                        print(f"new_action={new_action}")
+                        print(existing_actions[timestep])
+                        print("11111111111111")
                         # Sum actions at the same timestep
                         old_action = existing_actions[timestep]
                         summed_action_tensor = old_action.get_action() + new_action.get_action()
@@ -393,7 +398,12 @@ class SimClient:
                 if timestep in self.executed_actions:
                     executed_action = self.executed_actions[timestep]
                     new_action = action.get_action()
-                    
+
+                    print("-----------------")
+                    print(f"Incoming action: {new_action}")
+                    print(f"Executed action: {executed_action}")
+                    print(f"timestep: {timestep}")
+                    print("-----------------")
                     # Convert to numpy if needed
                     if isinstance(executed_action, torch.Tensor):
                         executed_action_np = executed_action.cpu().numpy()

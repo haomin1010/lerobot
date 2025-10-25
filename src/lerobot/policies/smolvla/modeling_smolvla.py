@@ -1201,6 +1201,11 @@ class VLAFlowMatching(nn.Module):
         
         # Compute denoising loss
         target = x_t - x_t_noisy
+        print("222222222222222222")
+        print(x_t[0])
+        print(x_t_noisy[0])
+        print(v_t[0])
+        print("222222222222222222")
         denoising_losses = F.mse_loss(target, v_t, reduction="none")  # [batch, chunk_size, action_dim]
         
         # Compute VICReg loss if CLS head is enabled
