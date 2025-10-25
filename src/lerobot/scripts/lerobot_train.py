@@ -157,7 +157,6 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     # Determine if this is the main process (for logging and checkpointing)
     # When using accelerate, only the main process should log to avoid duplicate outputs
     is_main_process = accelerator.is_main_process
-
     # Only log on main process
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))

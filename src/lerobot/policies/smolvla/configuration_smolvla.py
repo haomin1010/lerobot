@@ -83,7 +83,7 @@ class SmolVLAConfig(PreTrainedConfig):
     vicreg_lambda: float = 25.0  # Weight for invariance loss in VICReg
     vicreg_mu: float = 25.0  # Weight for variance loss in VICReg
     vicreg_nu: float = 1.0  # Weight for covariance loss in VICReg
-    cls_noise_scale: float = 0.25  # Scale of noise added to actions in delta_expert training
+    cls_noise_scale: float = 0.1  # Scale of noise added to actions in delta_expert training
     cls_similarity_threshold: float = 0.5  # Threshold for CLS similarity to decide caching (0.0-1.0)
 
     # Training presets

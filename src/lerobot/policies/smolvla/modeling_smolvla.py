@@ -599,13 +599,14 @@ class SmolVLAPolicy(PreTrainedPolicy):
         # 修复内存泄漏: 使用 .detach() 而不是 .clone()
         loss_dict["delta_losses_after_forward"] = losses.detach().mean().item()
 
-        if actions_is_pad is not None:
-            in_episode_bound = ~actions_is_pad
-            losses = losses * in_episode_bound.unsqueeze(-1)
-            loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
+        # if actions_is_pad is not None:
+        #     in_episode_bound = ~actions_is_pad
+        #     losses = losses * in_episode_bound.unsqueeze(-1)
+        #     loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
 
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
+        losses = losses[:, :5, :]
         loss_dict["delta_losses_after_rm_padding"] = losses.detach().mean().item()
 
         # For backward pass
@@ -1202,14 +1203,14 @@ class VLAFlowMatching(nn.Module):
         # Compute denoising loss
         target = x_t - x_t_noisy
 
-        denoising_losses = F.mse_loss(target[:, :5, :], v_t[:, :5, :], reduction="none")  # [batch, chunk_size, action_dim]
+        denoising_losses = F.mse_loss(target, v_t, reduction="none")  # [batch, chunk_size, action_dim]
 
         # print("222222222222222")
-        # print("actions=", actions)
-        # print("x_t=",x_t[0, :5, :])
-        # print("x_t_noisy="x_t_noisy[0, :5, :])
-        # print("target="target[0, :5, :])
-        # print("v_t="v_t[0, :5, :])
+        # print("actions=", actions[0, :3, :])
+        # print("x_t=",x_t[0, :3, :])
+        # print("x_t_noisy="x_t_noisy[0, :3, :])
+        # print("target="target[0, :3, :])
+        # print("v_t="v_t[0, :3, :])
         # print("222222222222222")
 
         # Compute VICReg loss if CLS head is enabled
