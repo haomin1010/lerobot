@@ -408,7 +408,8 @@ class SimClient:
                     print("-----------------")
                     print(f"Incoming action: {new_action}")
                     print(f"Executed action: {executed_action}")
-                    print(f"delta action: {self.executed_actions[timestep+100]}")
+                    if self.executed_actions[timestep+100] is not None:
+                        print(f"delta action: {self.executed_actions[timestep+100]}")
                     print(f"timestep: {timestep}")
                     print("-----------------")
                     # Convert to numpy if needed

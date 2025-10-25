@@ -605,8 +605,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         #     loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
 
         # Remove padding
-        losses = losses[:, :, : self.config.max_action_dim-1]
-        losses = losses[:, :5, :]
+        losses = losses[:, :5, : self.config.max_action_dim]
         loss_dict["delta_losses_after_rm_padding"] = losses.detach().mean().item()
 
         # For backward pass
@@ -1063,21 +1062,21 @@ class VLAFlowMatching(nn.Module):
         Returns:
             Noisy action tensor with same shape
         """
-        # Get original action dimension (non-padded part)
-        original_action_dim = self.config.action_feature.shape[0] if hasattr(self.config, 'action_feature') else self.config.max_action_dim
+        # Get original action dimension (non-padded part), gripper is excluded
+        original_action_dim = self.config.action_feature.shape[0] - 1 if hasattr(self.config, 'action_feature') else self.config.max_action_dim
         
         # Create a copy to avoid modifying original
         x_t_noisy = x_t.clone()
         
         # Generate Gaussian noise only for non-padded dimensions
-        noise = torch.randn(
+        noise = torch.rand(
             x_t.shape[0], 
             x_t.shape[1], 
             original_action_dim,  # Only for real action dimensions
             device=x_t.device,
             dtype=x_t.dtype
-        ) * noise_scale
-        
+        ) * 0.4 - 0.2
+        #) * noise_scale
         # Add noise only to non-padded part
         x_t_noisy[:, :, :original_action_dim] = x_t[:, :, :original_action_dim] + noise
         
@@ -1483,8 +1482,7 @@ class VLAFlowMatching(nn.Module):
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
 
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
-        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
-        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        position_ids = torch.cumsum(suffix_pad_masks, dim=1) - 1
 
         outputs_embeds, _ = self.vlm_with_expert.forward_delta(
             attention_mask=full_att_2d_masks,
