@@ -1158,7 +1158,7 @@ class VLAFlowMatching(nn.Module):
                 x_t += dt * v_t
                 time += dt
         
-        # 修复内存泄漏: detach x_t 并创建新tensor以启用梯度
+        # detach x_t, 并只取前5个动作
         x_t = x_t.detach().requires_grad_(False)
         
         # Fixed timestep for delta expert
@@ -1201,12 +1201,7 @@ class VLAFlowMatching(nn.Module):
         
         # Compute denoising loss
         target = x_t - x_t_noisy
-        print("222222222222222222")
-        print(x_t[0])
-        print(x_t_noisy[0])
-        print(v_t[0])
-        print("222222222222222222")
-        denoising_losses = F.mse_loss(target, v_t, reduction="none")  # [batch, chunk_size, action_dim]
+        denoising_losses = F.mse_loss(target[:, :5, :], v_t[:, :5, :], reduction="none")  # [batch, chunk_size, action_dim]
         
         # Compute VICReg loss if CLS head is enabled
         if self.config.use_cls_head:
