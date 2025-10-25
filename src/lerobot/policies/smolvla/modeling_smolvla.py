@@ -1075,7 +1075,7 @@ class VLAFlowMatching(nn.Module):
             original_action_dim,  # Only for real action dimensions
             device=x_t.device,
             dtype=x_t.dtype
-        ) * 0.4 - 0.2
+        ) * 0.5 - 0.25
         #) * noise_scale
         # Add noise only to non-padded part
         x_t_noisy[:, :, :original_action_dim] = x_t[:, :, :original_action_dim] + noise
