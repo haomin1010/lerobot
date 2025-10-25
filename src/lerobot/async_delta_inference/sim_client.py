@@ -356,6 +356,12 @@ class SimClient:
                             timestep=timestep,
                             action=summed_action_tensor
                         )
+                        self.executed_actions[timestep+100] = TimedAction(
+                            timestamp=new_action.get_timestamp(),  # Use newer timestamp
+                            timestep=timestep,
+                            action=new_action.get_action()
+                        )
+
                         self.logger.debug(f"Summed delta_action at timestep #{timestep}")
                     # else:
                     #     # Replace action directly (no summing)
@@ -402,6 +408,7 @@ class SimClient:
                     print("-----------------")
                     print(f"Incoming action: {new_action}")
                     print(f"Executed action: {executed_action}")
+                    print(f"delta action: {self.executed_actions[timestep+100]}")
                     print(f"timestep: {timestep}")
                     print("-----------------")
                     # Convert to numpy if needed

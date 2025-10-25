@@ -605,7 +605,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         #     loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
 
         # Remove padding
-        losses = losses[:, :, : self.config.max_action_dim]
+        losses = losses[:, :, : self.config.max_action_dim-1]
         losses = losses[:, :5, :]
         loss_dict["delta_losses_after_rm_padding"] = losses.detach().mean().item()
 
@@ -1208,9 +1208,9 @@ class VLAFlowMatching(nn.Module):
         # print("222222222222222")
         # print("actions=", actions[0, :3, :])
         # print("x_t=",x_t[0, :3, :])
-        # print("x_t_noisy="x_t_noisy[0, :3, :])
-        # print("target="target[0, :3, :])
-        # print("v_t="v_t[0, :3, :])
+        # print("x_t_noisy=",x_t_noisy[0, :3, :])
+        # print("target=",target[0, :3, :])
+        # print("v_t=",v_t[0, :3, :])
         # print("222222222222222")
 
         # Compute VICReg loss if CLS head is enabled
