@@ -1144,7 +1144,7 @@ class VLAFlowMatching(nn.Module):
         past_key_values_detached = {k: {'key_states': v['key_states'].detach(), 
                                         'value_states': v['value_states'].detach()} 
                                    for k, v in past_key_values.items()}
-        
+
         with torch.no_grad():
             time = initial_time_val
             while time >= -dt / 2:
@@ -1157,9 +1157,10 @@ class VLAFlowMatching(nn.Module):
                 )
                 x_t += dt * v_t
                 time += dt
-        
+
         # detach x_t, 并只取前5个动作
         x_t = x_t.detach().requires_grad_(False)
+        #x_t = actions
         
         # Fixed timestep for delta expert
         timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
@@ -1177,8 +1178,7 @@ class VLAFlowMatching(nn.Module):
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
         
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
-        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
-        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        position_ids = torch.cumsum(suffix_pad_masks, dim=1) - 1
         
         # Forward through delta expert to get suffix outputs (including CLS tokens)
         outputs_embeds, _ = self.vlm_with_expert.forward_delta(
@@ -1201,8 +1201,17 @@ class VLAFlowMatching(nn.Module):
         
         # Compute denoising loss
         target = x_t - x_t_noisy
+
         denoising_losses = F.mse_loss(target[:, :5, :], v_t[:, :5, :], reduction="none")  # [batch, chunk_size, action_dim]
-        
+
+        # print("222222222222222")
+        # print("actions=", actions)
+        # print("x_t=",x_t[0, :5, :])
+        # print("x_t_noisy="x_t_noisy[0, :5, :])
+        # print("target="target[0, :5, :])
+        # print("v_t="v_t[0, :5, :])
+        # print("222222222222222")
+
         # Compute VICReg loss if CLS head is enabled
         if self.config.use_cls_head:
             # Extract prefix CLS tokens (first num_cls_prefix tokens)
