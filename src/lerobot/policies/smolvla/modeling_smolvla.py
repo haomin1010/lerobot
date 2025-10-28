@@ -374,6 +374,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
             self.model.delta_action_time_mlp_in,
             self.model.delta_action_time_mlp_out,
             self.model.action_context_encoder,
+            self.model.delta_param,
         ]
         
         for module in delta_expert_modules:
