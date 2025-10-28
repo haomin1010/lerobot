@@ -604,8 +604,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         #     losses = losses * in_episode_bound.unsqueeze(-1)
         #     loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
 
-        # Remove padding
-        losses = losses[:, :5, : self.config.max_action_dim]
+        # No need to remove padding - denoising_losses already has correct shape
+        # losses shape: (batch, num_delta_action, max_action_dim)
         loss_dict["delta_losses_after_rm_padding"] = losses.detach().mean().item()
 
         # For backward pass
@@ -805,6 +805,9 @@ class VLAFlowMatching(nn.Module):
         # CLS head mechanism: learnable tokens for contrastive learning
         # pre_cls_param: added at the beginning of prefix (image/language tokens)
         # suf_cls_param: added at the end of suffix (action tokens)
+        self.delta_param = nn.Parameter(
+            torch.randn(1, self.config.num_delta_action, self.config.max_action_dim) * 0.02
+        )
         if self.config.use_cls_head:
             self.pre_cls_param = nn.Parameter(
                 torch.randn(1, self.config.num_cls_prefix, self.vlm_with_expert.config.text_config.hidden_size) * 0.02
@@ -1062,8 +1065,7 @@ class VLAFlowMatching(nn.Module):
         Returns:
             Noisy action tensor with same shape
         """
-        # Get original action dimension (non-padded part), gripper is excluded
-        original_action_dim = self.config.action_feature.shape[0] - 1 if hasattr(self.config, 'action_feature') else self.config.max_action_dim
+        original_action_dim = self.config.action_feature.shape[0] if hasattr(self.config, 'action_feature') else self.config.max_action_dim
         
         # Create a copy to avoid modifying original
         x_t_noisy = x_t.clone()
@@ -1158,16 +1160,18 @@ class VLAFlowMatching(nn.Module):
                 x_t += dt * v_t
                 time += dt
 
-        # detach x_t, 并只取前5个动作
-        x_t = x_t.detach().requires_grad_(False)
+        # detach x_t, 并只取前 num_delta_action 个动作
+        x_t = x_t[:, :self.config.num_delta_action, :].detach().requires_grad_(False)
         #x_t = actions
         
         # Fixed timestep for delta expert
         timestep = torch.tensor(0.5, dtype=torch.float32, device=device).expand(bsize)
         
         # Add noise to x_t (only to non-padded dimensions)
-        x_t_noisy = self._add_noise_to_actions(x_t, noise_scale=self.config.cls_noise_scale)
-        
+        #x_t_noisy = self._add_noise_to_actions(x_t, noise_scale=self.config.cls_noise_scale)
+
+        x_t_noisy = self.delta_param.expand(bsize, -1, -1)
+
         # Embed suffix with CLS tokens for delta expert
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix_delta(x_t_noisy, timestep)
         
@@ -1193,16 +1197,15 @@ class VLAFlowMatching(nn.Module):
         
         # Extract action predictions (excluding CLS tokens at the end if enabled)
         if self.config.use_cls_head:
-            action_out = suffix_out[:, -(self.config.chunk_size + self.config.num_cls_suffix):-self.config.num_cls_suffix]
+            action_out = suffix_out[:, -(self.config.num_delta_action + self.config.num_cls_suffix):-self.config.num_cls_suffix]
         else:
-            action_out = suffix_out[:, -self.config.chunk_size:]
+            action_out = suffix_out[:, -self.config.num_delta_action:]
         action_out = action_out.to(dtype=torch.float32)
         v_t = self.delta_action_out_proj(action_out)
         
         # Compute denoising loss
-        target = x_t - x_t_noisy
 
-        denoising_losses = F.mse_loss(target, v_t, reduction="none")  # [batch, chunk_size, action_dim]
+        denoising_losses = F.mse_loss(x_t, v_t, reduction="none")  # [batch, num_delta_action, action_dim]
 
         # print("222222222222222")
         # print("actions=", actions[0, :3, :])
@@ -1441,7 +1444,7 @@ class VLAFlowMatching(nn.Module):
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] * self.config.chunk_size
+        att_masks += [1] * self.config.num_delta_action
         
         # Concatenate embeddings BEFORE adding CLS tokens
         embs = torch.cat(embs, dim=1)

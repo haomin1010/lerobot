@@ -79,6 +79,9 @@ class SmolVLAConfig(PreTrainedConfig):
     use_cls_head: bool = False  # Enable CLS head mechanism
     num_cls_prefix: int = 2  # Number of CLS tokens at the beginning of prefix
     num_cls_suffix: int = 2  # Number of CLS tokens at the end of suffix
+    num_delta_action: int = 3  # Number of CLS tokens at the end of suffix
+
+    
     vicreg_weight: float = 0.01  # Weight for VICReg loss in delta_expert training
     vicreg_lambda: float = 25.0  # Weight for invariance loss in VICReg
     vicreg_mu: float = 25.0  # Weight for variance loss in VICReg
