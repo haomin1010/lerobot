@@ -374,13 +374,12 @@ class SmolVLAPolicy(PreTrainedPolicy):
             self.model.delta_action_time_mlp_in,
             self.model.delta_action_time_mlp_out,
             self.model.action_context_encoder,
-            self.model.delta_param,
         ]
         
         for module in delta_expert_modules:
             for param in module.parameters():
                 param.requires_grad = True
-        
+        self.model.delta_param.requires_grad = True
         print("✓ Froze all parameters except delta_expert and its projections")
 
     def _unfreeze_all_parameters(self):
