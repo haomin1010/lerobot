@@ -556,7 +556,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
             loss_dict["losses_after_in_ep_bound"] = losses.detach().mean().item()
 
         # Remove padding
-        losses = losses[:, :, : self.config.max_action_dim]
+        losses = losses[:, :, : self.config.action_feature.shape[0]]
         loss_dict["losses_after_rm_padding"] = losses.detach().mean().item()
 
         # For backward pass
@@ -604,7 +604,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         #     losses = losses * in_episode_bound.unsqueeze(-1)
         #     loss_dict["delta_losses_after_in_ep_bound"] = losses.detach().mean().item()
 
-        # No need to remove padding - denoising_losses already has correct shape
+        losses = losses[:, :, : self.config.action_feature]
         # losses shape: (batch, num_delta_action, max_action_dim)
         loss_dict["delta_losses_after_rm_padding"] = losses.detach().mean().item()
 
