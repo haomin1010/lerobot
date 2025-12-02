@@ -226,7 +226,10 @@ def compute_layer_complete(
     gates = []
     for i, hidden_states in enumerate(inputs_embeds):
         layer = models[i].layers[layer_idx]
-        hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
+        if adarms_cond[i] is not None:
+            hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
+        else:
+            hidden_states, gate = layer.input_layernorm(hidden_states)  # noqa: PLW2901
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
@@ -277,7 +280,10 @@ def compute_layer_complete(
         # first residual
         out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
         after_first_residual = out_emb.clone()
-        out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+        if adarms_cond[i] is not None:
+            out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+        else:
+            out_emb, gate = layer.post_attention_layernorm(out_emb)
         # Convert to bfloat16 if the next layer (mlp) uses bfloat16
         if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
             out_emb = out_emb.to(dtype=torch.bfloat16)
@@ -550,7 +556,10 @@ class PaliGemmaWithExpertModel(
             def compute_final_norms(inputs_embeds, adarms_cond):
                 outputs_embeds = []
                 for i, hidden_states in enumerate(inputs_embeds):
-                    out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                    if adarms_cond[i] is not None:
+                        out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                    else:
+                        out_emb, _ = models[i].norm(hidden_states)
                     outputs_embeds.append(out_emb)
                 return outputs_embeds
 
@@ -727,7 +736,10 @@ class PaliGemmaWithExpertModel(
         def compute_final_norms(inputs_embeds, adarms_cond):
             outputs_embeds = []
             for i, hidden_states in enumerate(inputs_embeds):
-                out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                if adarms_cond[i] is not None:
+                    out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                else:
+                    out_emb, _ = models[i].norm(hidden_states)
                 outputs_embeds.append(out_emb)
             return outputs_embeds
 
