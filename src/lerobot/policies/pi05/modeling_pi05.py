@@ -572,6 +572,181 @@ class PaliGemmaWithExpertModel(
 
         return [prefix_output, suffix_output], prefix_past_key_values
 
+    def forward_partial(
+        self,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        inputs_embeds: list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        adarms_cond: list[torch.Tensor] | None = None,
+        part_layer_num: int | None = None,
+    ):
+        """只处理前 part_layer_num 层，返回中间输出和状态。
+
+        Args:
+            attention_mask: 注意力掩码
+            position_ids: 位置 ID
+            past_key_values: 过去的 key-value cache
+            inputs_embeds: 输入嵌入列表 [prefix_embeds, suffix_embeds]
+            use_cache: 是否使用 cache
+            adarms_cond: adaRMS 条件
+            part_layer_num: 要处理的层数（从前开始）
+
+        Returns:
+            tuple: ([prefix_output, suffix_output], intermediate_state)
+                   intermediate_state 包含继续处理所需的信息
+        """
+        if adarms_cond is None:
+            adarms_cond = [None, None]
+
+        if inputs_embeds[0] is None or inputs_embeds[1] is None:
+            raise ValueError(
+                "forward_partial requires both prefix and suffix inputs. "
+                "Use regular forward() for single-path processing."
+            )
+
+        if part_layer_num is None:
+            raise ValueError("part_layer_num must be specified for forward_partial")
+
+        models = [self.paligemma.language_model, self.gemma_expert.model]
+        num_layers = self.paligemma.config.text_config.num_hidden_layers
+
+        if part_layer_num > num_layers:
+            raise ValueError(f"part_layer_num ({part_layer_num}) cannot exceed total layers ({num_layers})")
+
+        # Check if gradient checkpointing is enabled
+        use_gradient_checkpointing = (
+            hasattr(self.gemma_expert.model, "gradient_checkpointing")
+            and self.gemma_expert.model.gradient_checkpointing
+            and self.training
+        ) or (hasattr(self, "gradient_checkpointing") and self.gradient_checkpointing and self.training)
+
+        # Process only the first part_layer_num layers
+        current_inputs_embeds = inputs_embeds
+        for layer_idx in range(part_layer_num):
+            if use_gradient_checkpointing:
+                current_inputs_embeds = torch.utils.checkpoint.checkpoint(
+                    compute_layer_complete,
+                    layer_idx,
+                    current_inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    adarms_cond,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                    paligemma=self.paligemma,
+                    gemma_expert=self.gemma_expert,
+                )
+            else:
+                current_inputs_embeds = compute_layer_complete(
+                    layer_idx,
+                    current_inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    adarms_cond,
+                    paligemma=self.paligemma,
+                    gemma_expert=self.gemma_expert,
+                )
+
+        # Return intermediate outputs and state for continuation
+        intermediate_state = {
+            "inputs_embeds": current_inputs_embeds,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "adarms_cond": adarms_cond,
+            "processed_layers": part_layer_num,
+            "total_layers": num_layers,
+        }
+
+        return current_inputs_embeds, intermediate_state
+
+    def forward_remaining(
+        self,
+        intermediate_state: dict,
+        use_cache: bool | None = None,
+    ):
+        """从中间状态继续处理剩余的层。
+
+        Args:
+            intermediate_state: 由 forward_partial 返回的中间状态字典
+            use_cache: 是否使用 cache（保留用于接口一致性）
+
+        Returns:
+            tuple: ([prefix_output, suffix_output], None)
+        """
+        inputs_embeds = intermediate_state["inputs_embeds"]
+        attention_mask = intermediate_state["attention_mask"]
+        position_ids = intermediate_state["position_ids"]
+        adarms_cond = intermediate_state["adarms_cond"]
+        processed_layers = intermediate_state["processed_layers"]
+        total_layers = intermediate_state["total_layers"]
+
+        remaining_layers = total_layers - processed_layers
+        if remaining_layers <= 0:
+            raise ValueError(
+                f"No remaining layers to process. Already processed {processed_layers} out of {total_layers}"
+            )
+
+        models = [self.paligemma.language_model, self.gemma_expert.model]
+
+        # Check if gradient checkpointing is enabled
+        use_gradient_checkpointing = (
+            hasattr(self.gemma_expert.model, "gradient_checkpointing")
+            and self.gemma_expert.model.gradient_checkpointing
+            and self.training
+        ) or (hasattr(self, "gradient_checkpointing") and self.gradient_checkpointing and self.training)
+
+        # Process remaining layers
+        for layer_idx in range(processed_layers, total_layers):
+            if use_gradient_checkpointing:
+                inputs_embeds = torch.utils.checkpoint.checkpoint(
+                    compute_layer_complete,
+                    layer_idx,
+                    inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    adarms_cond,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                    paligemma=self.paligemma,
+                    gemma_expert=self.gemma_expert,
+                )
+            else:
+                inputs_embeds = compute_layer_complete(
+                    layer_idx,
+                    inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    adarms_cond,
+                    paligemma=self.paligemma,
+                    gemma_expert=self.gemma_expert,
+                )
+
+        # Apply final norm
+        def compute_final_norms(inputs_embeds, adarms_cond):
+            outputs_embeds = []
+            for i, hidden_states in enumerate(inputs_embeds):
+                out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                outputs_embeds.append(out_emb)
+            return outputs_embeds
+
+        # Apply gradient checkpointing to final norm if enabled
+        if use_gradient_checkpointing:
+            outputs_embeds = torch.utils.checkpoint.checkpoint(
+                compute_final_norms,
+                inputs_embeds,
+                adarms_cond,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        else:
+            outputs_embeds = compute_final_norms(inputs_embeds, adarms_cond)
+
+        prefix_output = outputs_embeds[0]
+        suffix_output = outputs_embeds[1]
+
+        return [prefix_output, suffix_output], None
 
 class SingleHeadContentAttention(nn.Module):
     """单头内容注意力网络。
