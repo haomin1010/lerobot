@@ -1158,21 +1158,16 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
         # 执行 forward_partial，只处理前 part_layer_num 层
-        inputs_embeds = [prefix_embs_with_cls, dummy_suffix_embs]
-
-        def forward_partial_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids):
-            intermediate_embeds, intermediate_state = self.paligemma_with_expert.forward_partial(
-                attention_mask=att_2d_masks_4d,
-                position_ids=position_ids,
-                inputs_embeds=[prefix_embs, suffix_embs],
-                use_cache=False,
-                adarms_cond=[None, None],
-                part_layer_num=self.part_layer_num,
-            )
-            return intermediate_embeds, intermediate_state
-
-        intermediate_embeds, intermediate_state = self._apply_checkpoint(
-            forward_partial_func, prefix_embs_with_cls, dummy_suffix_embs, att_2d_masks_4d, position_ids
+        # 按照 forward 的逻辑，prefix 使用 None，dummy suffix 也使用 None
+        # 不应用外层的 checkpoint，避免嵌套梯度检查点导致的状态问题
+        # forward_partial 内部会自己处理梯度检查点
+        intermediate_embeds, intermediate_state = self.paligemma_with_expert.forward_partial(
+            attention_mask=att_2d_masks_4d,
+            position_ids=position_ids,
+            inputs_embeds=[prefix_embs_with_cls, dummy_suffix_embs],
+            use_cache=False,
+            adarms_cond=[None, None],
+            part_layer_num=self.part_layer_num,
         )
 
         # 从中间输出中提取分类头对应的输出（第一个 token）
