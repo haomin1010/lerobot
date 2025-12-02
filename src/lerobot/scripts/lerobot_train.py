@@ -342,7 +342,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             cfg.optimizer.grad_clip_norm,
             accelerator=accelerator,
             lr_scheduler=lr_scheduler,
-            cmp=(step%4==0),
+            cmp=(step%4==3),
         )
 
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
