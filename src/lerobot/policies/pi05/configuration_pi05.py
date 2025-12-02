@@ -88,6 +88,8 @@ class PI05Config(PreTrainedConfig):
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
 
     part_layer_num: int = 6
+    attn_act_len: int = 10
+
     def __post_init__(self):
         super().__post_init__()
 
