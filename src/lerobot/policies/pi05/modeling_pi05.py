@@ -229,7 +229,7 @@ def compute_layer_complete(
         # Log input_layernorm type and attributes for debugging
         import logging
         input_norm = layer.input_layernorm
-        logging.debug(f"input_layernorm type: {type(input_norm)}, has weight: {hasattr(input_norm, 'weight')}, dir: {[x for x in dir(input_norm) if not x.startswith('_')]}")
+        logging.info(f"input_layernorm type: {type(input_norm)}, has weight: {hasattr(input_norm, 'weight')}, dir: {[x for x in dir(input_norm) if not x.startswith('_')]}")
         hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
