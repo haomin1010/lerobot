@@ -228,17 +228,23 @@ def compute_layer_complete(
         layer = models[i].layers[layer_idx]
         input_norm = layer.input_layernorm
         # Check if this is an adaRMS version (has cond_dim but no weight)
-        # For adaRMS versions, we must always pass cond parameter, even if it's None
-        # The forward method will handle None cond by using dense layer
-        if hasattr(input_norm, 'cond_dim') and not hasattr(input_norm, 'weight'):
-            # This is an adaRMS version, always pass cond (even if None)
+        # For adaRMS versions, when cond=None, we need to provide a zero cond tensor
+        # because the forward method will try to use self.weight which doesn't exist
+        cond_dim = getattr(input_norm, 'cond_dim', None)
+        has_weight = hasattr(input_norm, 'weight')
+        is_adarms = cond_dim is not None and not has_weight
+        
+        if is_adarms and adarms_cond[i] is None:
+            # For adaRMS version with None cond, provide a zero cond tensor
+            batch_size = hidden_states.shape[0]
+            zero_cond = torch.zeros(batch_size, cond_dim, device=hidden_states.device, dtype=hidden_states.dtype)
+            hidden_states, gate = layer.input_layernorm(hidden_states, cond=zero_cond)  # noqa: PLW2901
+        elif adarms_cond[i] is not None:
+            # Pass cond parameter
             hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
         else:
-            # Standard version, can pass cond or not
-            if adarms_cond[i] is not None:
-                hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
-            else:
-                hidden_states, gate = layer.input_layernorm(hidden_states)  # noqa: PLW2901
+            # Standard version without cond
+            hidden_states, gate = layer.input_layernorm(hidden_states)  # noqa: PLW2901
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
@@ -291,15 +297,19 @@ def compute_layer_complete(
         after_first_residual = out_emb.clone()
         post_norm = layer.post_attention_layernorm
         # Check if this is an adaRMS version (has cond_dim but no weight)
-        if hasattr(post_norm, 'cond_dim') and not hasattr(post_norm, 'weight'):
-            # This is an adaRMS version, always pass cond (even if None)
+        cond_dim = getattr(post_norm, 'cond_dim', None)
+        has_weight = hasattr(post_norm, 'weight')
+        is_adarms = cond_dim is not None and not has_weight
+        
+        if is_adarms and adarms_cond[i] is None:
+            # For adaRMS version with None cond, provide a zero cond tensor
+            batch_size = out_emb.shape[0]
+            zero_cond = torch.zeros(batch_size, cond_dim, device=out_emb.device, dtype=out_emb.dtype)
+            out_emb, gate = layer.post_attention_layernorm(out_emb, cond=zero_cond)
+        elif adarms_cond[i] is not None:
             out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
         else:
-            # Standard version
-            if adarms_cond[i] is not None:
-                out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
-            else:
-                out_emb, gate = layer.post_attention_layernorm(out_emb)
+            out_emb, gate = layer.post_attention_layernorm(out_emb)
         # Convert to bfloat16 if the next layer (mlp) uses bfloat16
         if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
             out_emb = out_emb.to(dtype=torch.bfloat16)
@@ -574,15 +584,19 @@ class PaliGemmaWithExpertModel(
                 for i, hidden_states in enumerate(inputs_embeds):
                     norm = models[i].norm
                     # Check if this is an adaRMS version (has cond_dim but no weight)
-                    if hasattr(norm, 'cond_dim') and not hasattr(norm, 'weight'):
-                        # This is an adaRMS version, always pass cond (even if None)
+                    cond_dim = getattr(norm, 'cond_dim', None)
+                    has_weight = hasattr(norm, 'weight')
+                    is_adarms = cond_dim is not None and not has_weight
+                    
+                    if is_adarms and adarms_cond[i] is None:
+                        # For adaRMS version with None cond, provide a zero cond tensor
+                        batch_size = hidden_states.shape[0]
+                        zero_cond = torch.zeros(batch_size, cond_dim, device=hidden_states.device, dtype=hidden_states.dtype)
+                        out_emb, _ = models[i].norm(hidden_states, cond=zero_cond)
+                    elif adarms_cond[i] is not None:
                         out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
                     else:
-                        # Standard version
-                        if adarms_cond[i] is not None:
-                            out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
-                        else:
-                            out_emb, _ = models[i].norm(hidden_states)
+                        out_emb, _ = models[i].norm(hidden_states)
                     outputs_embeds.append(out_emb)
                 return outputs_embeds
 
@@ -761,15 +775,19 @@ class PaliGemmaWithExpertModel(
             for i, hidden_states in enumerate(inputs_embeds):
                 norm = models[i].norm
                 # Check if this is an adaRMS version (has cond_dim but no weight)
-                if hasattr(norm, 'cond_dim') and not hasattr(norm, 'weight'):
-                    # This is an adaRMS version, always pass cond (even if None)
+                cond_dim = getattr(norm, 'cond_dim', None)
+                has_weight = hasattr(norm, 'weight')
+                is_adarms = cond_dim is not None and not has_weight
+                
+                if is_adarms and adarms_cond[i] is None:
+                    # For adaRMS version with None cond, provide a zero cond tensor
+                    batch_size = hidden_states.shape[0]
+                    zero_cond = torch.zeros(batch_size, cond_dim, device=hidden_states.device, dtype=hidden_states.dtype)
+                    out_emb, _ = models[i].norm(hidden_states, cond=zero_cond)
+                elif adarms_cond[i] is not None:
                     out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
                 else:
-                    # Standard version
-                    if adarms_cond[i] is not None:
-                        out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
-                    else:
-                        out_emb, _ = models[i].norm(hidden_states)
+                    out_emb, _ = models[i].norm(hidden_states)
                 outputs_embeds.append(out_emb)
             return outputs_embeds
 
