@@ -1159,16 +1159,26 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         # 执行 forward_partial，只处理前 part_layer_num 层
         # 按照 forward 的逻辑，prefix 使用 None，dummy suffix 也使用 None
-        # 不应用外层的 checkpoint，避免嵌套梯度检查点导致的状态问题
-        # forward_partial 内部会自己处理梯度检查点
-        intermediate_embeds, intermediate_state = self.paligemma_with_expert.forward_partial(
-            attention_mask=att_2d_masks_4d,
-            position_ids=position_ids,
-            inputs_embeds=[prefix_embs_with_cls, dummy_suffix_embs],
-            use_cache=False,
-            adarms_cond=[None, None],
-            part_layer_num=self.part_layer_num,
-        )
+        # 临时禁用内部的梯度检查点，避免在梯度检查点上下文中模块状态丢失
+        # 保存并禁用梯度检查点设置
+        original_gemma_checkpointing = False
+        if hasattr(self.paligemma_with_expert.gemma_expert.model, "gradient_checkpointing"):
+            original_gemma_checkpointing = self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing
+            self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
+        
+        try:
+            intermediate_embeds, intermediate_state = self.paligemma_with_expert.forward_partial(
+                attention_mask=att_2d_masks_4d,
+                position_ids=position_ids,
+                inputs_embeds=[prefix_embs_with_cls, dummy_suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, None],
+                part_layer_num=self.part_layer_num,
+            )
+        finally:
+            # 恢复梯度检查点设置
+            if hasattr(self.paligemma_with_expert.gemma_expert.model, "gradient_checkpointing"):
+                self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = original_gemma_checkpointing
 
         # 从中间输出中提取分类头对应的输出（第一个 token）
         cmp_vec_0 = intermediate_embeds[0][:, 0, :]  # [batch_size, hidden_dim]
