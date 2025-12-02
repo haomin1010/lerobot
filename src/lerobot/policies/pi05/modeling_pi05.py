@@ -1288,7 +1288,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             )
 
         # 第三步：使用 VICReg loss 计算对比学习损失
-        losses = vicreg_loss(
+        loss_scalar = vicreg_loss(
             cmp_vec_0,
             cmp_vec_1,
             lambda_param=lambda_param,
@@ -1296,6 +1296,14 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             nu_param=nu_param,
             gamma=gamma,
         )
+
+        # 将标量损失扩展为 [batch_size, 1, action_dim] 以匹配 forward 的返回格式
+        # vicreg_loss 返回的是标量（0维），没有 batch 维度，需要扩展
+        batch_size = cmp_vec_0.shape[0]
+        action_dim = self.config.max_action_dim
+        
+        # 将标量损失扩展为 [batch_size, 1, action_dim]
+        losses = loss_scalar.view(1, 1, 1).expand(batch_size, 1, action_dim)
 
         return losses
 
