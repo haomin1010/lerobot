@@ -929,6 +929,15 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             self.cls_head_prefix = None
             self.part_layer_num = None
 
+        # 投影头：将 paligemma 的 hidden_dim (2048) 投影到 action_expert 的 hidden_dim (1024)
+        # 用于对比学习中的维度匹配
+        self.cmp_projection = nn.Sequential(
+            nn.Linear(paligemma_config.width, action_expert_config.width),
+            nn.LayerNorm(action_expert_config.width),
+            nn.GELU(),
+            nn.Linear(action_expert_config.width, action_expert_config.width),
+        )
+
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
 
@@ -1236,7 +1245,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         )
 
         # 从中间输出中提取分类头对应的输出（第一个 token）
-        cmp_vec_0 = intermediate_embeds[0][:, 0, :]  # [batch_size, hidden_dim]
+        cmp_vec_0 = intermediate_embeds[0][:, 0, :]  # [batch_size, paligemma_hidden_dim]
+        # 通过投影头将 cmp_vec_0 从 paligemma 的维度投影到 action_expert 的维度
+        cmp_vec_0 = self.cmp_projection(cmp_vec_0)  # [batch_size, action_expert_hidden_dim]
         cmp_vec_0 = cmp_vec_0.to(dtype=torch.float32)  # 转换为 float32 用于损失计算
 
         # 确保维度正确
@@ -1639,6 +1650,9 @@ class PI05Policy(PreTrainedPolicy):
         # content_attention 的参数
         if self.model.content_attention is not None:
             params.extend(self.model.content_attention.parameters())
+
+        if self.model.cmp_projection is not None:
+            params.extend(self.model.cmp_projection.parameters())
 
         # cls_head_prefix 参数
         if self.model.cls_head_prefix is not None:
