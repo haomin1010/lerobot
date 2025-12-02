@@ -288,6 +288,72 @@ def compute_layer_complete(
         start_pos = end_pos
     return outputs_embeds
 
+def vicreg_loss(
+    z1: Tensor,
+    z2: Tensor,
+    lambda_param: float = 25.0,
+    mu_param: float = 25.0,
+    nu_param: float = 1.0,
+    gamma: float = 1.0,
+    eps: float = 1e-4,
+) -> Tensor:
+    """VICReg loss with Variance-Invariance-Covariance Regularization (PyTorch version).
+
+    Args:
+        z1: First representation [batch, num_tokens, dim] or [batch, dim]
+        z2: Second representation [batch, num_tokens, dim] or [batch, dim]
+        lambda_param: Weight for invariance loss (default: 25.0)
+        mu_param: Weight for variance loss (default: 25.0)
+        nu_param: Weight for covariance loss (default: 1.0)
+        gamma: Target standard deviation (default: 1.0)
+        eps: Small constant for numerical stability
+
+    Returns:
+        VICReg loss value (scalar tensor)
+    """
+    # Handle both 2D and 3D inputs
+    if z1.dim() == 2:
+        z1 = z1.unsqueeze(1)  # [batch, dim] -> [batch, 1, dim]
+    if z2.dim() == 2:
+        z2 = z2.unsqueeze(1)  # [batch, dim] -> [batch, 1, dim]
+
+    batch_size, num_tokens, dim = z1.shape
+
+    # Reshape to (batch*num_tokens, dim)
+    z1_flat = z1.reshape(-1, dim)  # [batch*num_tokens, dim]
+    z2_flat = z2.reshape(-1, dim)  # [batch*num_tokens, dim]
+    n_samples = z1_flat.shape[0]
+
+    # Invariance loss: L2 distance between corresponding representations
+    invariance_loss = torch.mean(torch.square(z1_flat - z2_flat), dim=-1)  # [batch*num_tokens]
+    invariance_loss = torch.mean(invariance_loss)  # scalar
+
+    # Variance loss: encourage standard deviation to be close to gamma
+    std_z1 = torch.sqrt(torch.var(z1_flat, dim=0) + eps)  # [dim]
+    std_z2 = torch.sqrt(torch.var(z2_flat, dim=0) + eps)  # [dim]
+    variance_loss = torch.mean(F.relu(gamma - std_z1)) + torch.mean(F.relu(gamma - std_z2))
+
+    # Covariance loss: encourage decorrelation of features
+    z1_centered = z1_flat - torch.mean(z1_flat, dim=0, keepdim=True)  # [batch*num_tokens, dim]
+    z2_centered = z2_flat - torch.mean(z2_flat, dim=0, keepdim=True)  # [batch*num_tokens, dim]
+
+    cov_z1 = (z1_centered.T @ z1_centered) / (n_samples - 1)  # [dim, dim]
+    cov_z2 = (z2_centered.T @ z2_centered) / (n_samples - 1)  # [dim, dim]
+
+    # Off-diagonal mask
+    off_diagonal_mask = 1 - torch.eye(dim, device=z1.device, dtype=z1.dtype)
+    offdiag_z1 = cov_z1 * off_diagonal_mask
+    offdiag_z2 = cov_z2 * off_diagonal_mask
+
+    # Covariance loss (normalize by dim, not number of elements)
+    cov_loss_z1 = torch.sum(torch.square(offdiag_z1)) / dim
+    cov_loss_z2 = torch.sum(torch.square(offdiag_z2)) / dim
+    covariance_loss = cov_loss_z1 + cov_loss_z2
+
+    # Total loss
+    total_loss = lambda_param * invariance_loss + mu_param * variance_loss + nu_param * covariance_loss
+
+    return total_loss
 
 class GemmaConfig:  # see openpi `gemma.py: Config`
     """Configuration for Gemma model variants."""
@@ -507,6 +573,82 @@ class PaliGemmaWithExpertModel(
         return [prefix_output, suffix_output], prefix_past_key_values
 
 
+class SingleHeadContentAttention(nn.Module):
+    """单头内容注意力网络。
+
+    输入: suffix_outs [batch_size, attn_act_len, hidden_dim] + 可学习的分类头
+    输出: 分类头对应的输出 [batch_size, hidden_dim]
+    """
+
+    def __init__(self, hidden_dim: int, attn_act_len: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.attn_act_len = attn_act_len
+
+        # 可学习的分类头（query）
+        self.class_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
+
+        # 单头注意力层（简单设计，层数不多）
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        # 输出层归一化和投影
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, suffix_outs: Tensor) -> Tensor:
+        """前向传播。
+
+        Args:
+            suffix_outs: Tensor with shape [batch_size, attn_act_len, hidden_dim]
+
+        Returns:
+            output: [batch_size, hidden_dim] - 分类头对应的输出
+        """
+        batch_size = suffix_outs.shape[0]
+
+        # 验证输入维度
+        if suffix_outs.shape[1] != self.attn_act_len:
+            raise ValueError(
+                f"Expected suffix_outs to have {self.attn_act_len} tokens in dim 1, "
+                f"but got {suffix_outs.shape[1]}"
+            )
+        if suffix_outs.shape[2] != self.hidden_dim:
+            raise ValueError(
+                f"Expected suffix_outs to have hidden_dim={self.hidden_dim} in dim 2, "
+                f"but got {suffix_outs.shape[2]}"
+            )
+
+        # 使用 suffix_outs 作为 keys 和 values: [batch_size, attn_act_len, hidden_dim]
+        keys_values = suffix_outs
+
+        # 准备 query（分类头）
+        query = self.class_token.expand(batch_size, -1, -1)  # [batch_size, 1, hidden_dim]
+
+        # 计算 Q, K, V
+        q = self.q_proj(query)  # [batch_size, 1, hidden_dim]
+        k = self.k_proj(keys_values)  # [batch_size, attn_act_len, hidden_dim]
+        v = self.v_proj(keys_values)  # [batch_size, attn_act_len, hidden_dim]
+
+        # 单头注意力计算
+        # 缩放点积注意力
+        scale = math.sqrt(self.hidden_dim)
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / scale  # [batch_size, 1, attn_act_len]
+        attn_weights = F.softmax(attn_scores, dim=-1)  # [batch_size, 1, attn_act_len]
+
+        # 应用注意力权重
+        attended = torch.matmul(attn_weights, v)  # [batch_size, 1, hidden_dim]
+        attended = attended.squeeze(1)  # [batch_size, hidden_dim]
+
+        # 残差连接和层归一化
+        output = self.layer_norm(attended)
+
+        # 输出投影
+        output = self.out_proj(output)  # [batch_size, hidden_dim]
+
+        return output
+
 class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
     """Core PI05 PyTorch model."""
 
@@ -530,6 +672,27 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+
+        # 单头内容注意力网络（可选）
+        attn_act_len = getattr(config, "attn_act_len", None)
+        if attn_act_len is not None and attn_act_len > 0:
+            self.content_attention = SingleHeadContentAttention(
+                hidden_dim=action_expert_config.width,
+                attn_act_len=attn_act_len,
+            )
+        else:
+            self.content_attention = None
+
+        # 可学习的分类头参数（用于对比学习）
+        part_layer_num = getattr(config, "part_layer_num", None)
+        if part_layer_num is not None and part_layer_num > 0:
+            self.cls_head_prefix = nn.Parameter(
+                torch.randn(1, 1, action_expert_config.width)
+            )
+            self.part_layer_num = part_layer_num
+        else:
+            self.cls_head_prefix = None
+            self.part_layer_num = None
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -742,6 +905,154 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return F.mse_loss(u_t, v_t, reduction="none")
 
+    def forward_cmp(
+            self,
+            images,
+            img_masks,
+            tokens,
+            masks,
+            actions,
+            lambda_param: float = 25.0,
+            mu_param: float = 25.0,
+            nu_param: float = 1.0,
+            gamma: float = 1.0,
+    ) -> Tensor:
+        """对比学习前向传播，使用 VICReg loss。
+
+        Args:
+            images: 图像列表
+            img_masks: 图像掩码列表
+            tokens: 语言 tokens
+            masks: 语言 token 掩码
+            actions: 动作张量 [batch_size, chunk_size, action_dim]
+            lambda_param: VICReg invariance loss 权重
+            mu_param: VICReg variance loss 权重
+            nu_param: VICReg covariance loss 权重
+            gamma: VICReg 目标标准差
+
+        Returns:
+            VICReg loss (scalar tensor)
+        """
+        if self.cls_head_prefix is None:
+            raise ValueError(
+                "cls_head_prefix is not initialized. Please set part_layer_num in config."
+            )
+        if self.content_attention is None:
+            raise ValueError(
+                "content_attention is not initialized. Please set attn_act_len in config."
+            )
+        if self.part_layer_num is None:
+            raise ValueError(
+                "part_layer_num is not set in config."
+            )
+
+        batch_size = tokens.shape[0]
+        device = tokens.device
+
+        # 第一步：准备 prefix embeddings，并将 cls_head_prefix 添加到前面
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+
+        # 将 cls_head_prefix 添加到 prefix_embs 的前面
+        # 确保数据类型匹配
+        cls_head = self.cls_head_prefix.expand(batch_size, -1, -1)  # [batch_size, 1, hidden_dim]
+        cls_head = cls_head.to(dtype=prefix_embs.dtype)  # 确保数据类型匹配
+        prefix_embs_with_cls = torch.cat([cls_head, prefix_embs], dim=1)  # [batch_size, 1 + seq_len, hidden_dim]
+
+        # 更新 pad_masks 和 att_masks，为 cls_head 添加对应的掩码
+        cls_pad_mask = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
+        prefix_pad_masks_with_cls = torch.cat([cls_pad_mask, prefix_pad_masks], dim=1)
+
+        cls_att_mask = torch.tensor([0], dtype=torch.bool, device=device)  # cls_head 可以 attend 到所有之前的内容
+        prefix_att_masks_with_cls = torch.cat([cls_att_mask.unsqueeze(0).expand(batch_size, -1), prefix_att_masks],
+                                              dim=1)
+
+        # 准备一个 dummy suffix_embs（forward_partial 需要两个输入）
+        action_expert_config = get_gemma_config(self.config.action_expert_variant)
+        dummy_suffix_embs = torch.zeros(
+            batch_size, 1, action_expert_config.width, dtype=prefix_embs_with_cls.dtype, device=device
+        )
+        dummy_suffix_pad_masks = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
+        dummy_suffix_att_masks = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
+
+        # 合并 masks
+        pad_masks = torch.cat([prefix_pad_masks_with_cls, dummy_suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks_with_cls, dummy_suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        # 执行 forward_partial，只处理前 part_layer_num 层
+        inputs_embeds = [prefix_embs_with_cls, dummy_suffix_embs]
+
+        def forward_partial_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids):
+            intermediate_embeds, intermediate_state = self.paligemma_with_expert.forward_partial(
+                attention_mask=att_2d_masks_4d,
+                position_ids=position_ids,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, None],
+                part_layer_num=self.part_layer_num,
+            )
+            return intermediate_embeds, intermediate_state
+
+        intermediate_embeds, intermediate_state = self._apply_checkpoint(
+            forward_partial_func, prefix_embs_with_cls, dummy_suffix_embs, att_2d_masks_4d, position_ids
+        )
+
+        # 从中间输出中提取分类头对应的输出（第一个 token）
+        cmp_vec_0 = intermediate_embeds[0][:, 0, :]  # [batch_size, hidden_dim]
+        cmp_vec_0 = cmp_vec_0.to(dtype=torch.float32)  # 转换为 float32 用于损失计算
+
+        # 确保维度正确
+        if cmp_vec_0.dim() != 2:
+            raise ValueError(f"Expected cmp_vec_0 to be 2D [batch_size, hidden_dim], got shape {cmp_vec_0.shape}")
+
+        # 第二步：将 actions 输入到 SingleHeadContentAttention 中
+        # 首先需要将 actions 投影到 hidden_dim，然后组织成 [batch_size, attn_act_len, hidden_dim] 的格式
+        attn_act_len = self.content_attention.attn_act_len
+
+        # 处理 actions：如果 actions 是 [batch_size, chunk_size, action_dim]，需要 pad 到 max_action_dim
+        if actions.shape[-1] < self.config.max_action_dim:
+            # Pad actions to max_action_dim if needed
+            actions_padded = pad_vector(actions, self.config.max_action_dim)
+        else:
+            actions_padded = actions
+
+        # 如果 actions 的 chunk_size 不够，需要处理
+        if actions_padded.shape[1] < attn_act_len:
+            raise ValueError(
+                f"actions chunk_size ({actions_padded.shape[1]}) must be >= attn_act_len ({attn_act_len})"
+            )
+
+        # 选择前 attn_act_len 个 action steps
+        selected_actions = actions_padded[:, :attn_act_len, :]  # [batch_size, attn_act_len, max_action_dim]
+
+        # 投影 actions 到 hidden_dim
+        action_proj = self.action_in_proj(selected_actions)  # [batch_size, attn_act_len, hidden_dim]
+
+        # 通过 SingleHeadContentAttention 得到 cmp_vec_1
+        cmp_vec_1 = self.content_attention(action_proj)  # [batch_size, hidden_dim]
+        cmp_vec_1 = cmp_vec_1.to(dtype=torch.float32)  # 转换为 float32 用于损失计算
+
+        # 确保维度匹配
+        if cmp_vec_0.shape != cmp_vec_1.shape:
+            raise ValueError(
+                f"Dimension mismatch: cmp_vec_0 shape {cmp_vec_0.shape} != cmp_vec_1 shape {cmp_vec_1.shape}"
+            )
+
+        # 第三步：使用 VICReg loss 计算对比学习损失
+        losses = vicreg_loss(
+            cmp_vec_0,
+            cmp_vec_1,
+            lambda_param=lambda_param,
+            mu_param=mu_param,
+            nu_param=nu_param,
+            gamma=gamma,
+        )
+
+        return losses
+
     @torch.no_grad()  # see openpi `sample_actions` (slightly adapted)
     def sample_actions(
         self,
@@ -897,6 +1208,8 @@ class PI05Policy(PreTrainedPolicy):
         self.model.to(config.device)
 
         self.reset()
+
+        self.train_addition_only: bool = False
 
     @classmethod
     def from_pretrained(
@@ -1077,6 +1390,39 @@ class PI05Policy(PreTrainedPolicy):
     def get_optim_params(self) -> dict:
         return self.parameters()
 
+    def _apply_param_freezing(self) -> None:
+        """根据 train_addition_only 冻结或解冻参数。"""
+        # 如果不只训练新增参数，则全部参与训练
+        if not self.train_addition_only:
+            for p in self.parameters():
+                p.requires_grad = True
+            return
+
+        # 只训练 addition_params，其它参数 requires_grad=False
+        params = []
+
+        # content_attention 的参数
+        if self.model.content_attention is not None:
+            params.extend(self.model.content_attention.parameters())
+
+        # cls_head_prefix 参数
+        if self.model.cls_head_prefix is not None:
+            params.append(self.model.cls_head_prefix)
+
+        addition_ids = {id(p) for p in params}
+        for p in self.parameters():
+            p.requires_grad = id(p) in addition_ids
+
+    def freeze_params(self) -> None:
+        """设置是否只训练新增参数，并立即应用到 requires_grad。"""
+        self.train_addition_only = True
+        self._apply_param_freezing()
+
+    def unfreeze_params(self) -> None:
+        """显式解冻所有参数，恢复联合训练。"""
+        self.train_addition_only = False
+        self._apply_param_freezing()
+
     def reset(self):
         """Reset internal state - called when environment resets."""
         self._action_queue = deque(maxlen=self.config.n_action_steps)
@@ -1206,18 +1552,23 @@ class PI05Policy(PreTrainedPolicy):
 
         return actions
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
+    def forward(self, batch: dict[str, Tensor], cmp=False) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
+        if cmp and not self.train_addition_only:
+            self.freeze_params()
+        if not cmp and self.train_addition_only:
+            self.unfreeze_params()
 
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.prepare_action(batch)
-
-        # Compute loss (no separate state needed for PI05)
-        losses = self.model.forward(images, img_masks, tokens, masks, actions)
-
+        if not cmp:
+            # Compute loss (no separate state needed for PI05)
+            losses = self.model.forward(images, img_masks, tokens, masks, actions)
+        else:
+            losses = self.model.forward_cmp(images, img_masks, tokens, masks, actions)
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]
