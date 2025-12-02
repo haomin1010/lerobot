@@ -687,7 +687,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         part_layer_num = getattr(config, "part_layer_num", None)
         if part_layer_num is not None and part_layer_num > 0:
             self.cls_head_prefix = nn.Parameter(
-                torch.randn(1, 1, action_expert_config.width)
+                torch.randn(1, 1, paligemma_config.width)
             )
             self.part_layer_num = part_layer_num
         else:
