@@ -138,6 +138,8 @@ def rollout(
     # Reset the policy and environments.
     policy.reset()
     observation, info = env.reset(seed=seeds)
+    print("11111111")
+    print(observation)
     if render_callback is not None:
         render_callback(env)
 
@@ -161,6 +163,8 @@ def rollout(
     while not np.all(done) and step < max_steps:
         # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
         observation = preprocess_observation(observation)
+        print("11111111")
+        print(observation)
         if return_observations:
             all_observations.append(deepcopy(observation))
 
@@ -170,8 +174,12 @@ def rollout(
 
         # Apply environment-specific preprocessing (e.g., LiberoProcessorStep for LIBERO)
         observation = env_preprocessor(observation)
+        print("11111111")
+        print(observation)
 
         observation = preprocessor(observation)
+        print("11111111")
+        print(observation)
         with torch.inference_mode():
             action = policy.select_action(observation)
         action = postprocessor(action)
