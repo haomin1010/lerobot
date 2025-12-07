@@ -161,21 +161,17 @@ def rollout(
     while not np.all(done) and step < max_steps:
         # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
         observation = preprocess_observation(observation)
+        if return_observations:
+            all_observations.append(deepcopy(observation))
 
         # Infer "task" from attributes of environments.
         # TODO: works with SyncVectorEnv but not AsyncVectorEnv
         observation = add_envs_task(env, observation)
 
         # Apply environment-specific preprocessing (e.g., LiberoProcessorStep for LIBERO)
-        # This handles nested dictionaries (e.g., robot_state -> state)
         observation = env_preprocessor(observation)
 
         observation = preprocessor(observation)
-        
-        # Save observation AFTER preprocessing to ensure nested dicts are flattened
-        if return_observations:
-            all_observations.append(deepcopy(observation))
-        
         with torch.inference_mode():
             action = policy.select_action(observation)
         action = postprocessor(action)
@@ -229,9 +225,6 @@ def rollout(
     # Track the final observation.
     if return_observations:
         observation = preprocess_observation(observation)
-        observation = add_envs_task(env, observation)
-        observation = env_preprocessor(observation)
-        observation = preprocessor(observation)
         all_observations.append(deepcopy(observation))
 
     # Stack the sequence along the first dimension so that we have (batch, sequence, *) tensors.
@@ -243,42 +236,8 @@ def rollout(
     }
     if return_observations:
         stacked_observations = {}
-        # Collect all keys that appear in all observations
-        all_keys = set()
-        for obs in all_observations:
-            all_keys.update(obs.keys())
-        
-        skipped_keys = []
-        # Only stack keys that are present in all observations, are not None, and are Tensors
-        for key in all_keys:
-            # Check if key exists, is not None, and is a Tensor in all observations
-            values = []
-            valid = True
-            for i, obs in enumerate(all_observations):
-                if key not in obs or obs[key] is None:
-                    valid = False
-                    skipped_keys.append((key, f"missing or None in observation {i}"))
-                    break
-                val = obs[key]
-                if not isinstance(val, torch.Tensor):
-                    valid = False
-                    skipped_keys.append((key, f"not a Tensor in observation {i}, got {type(val).__name__}"))
-                    break
-                values.append(val)
-            
-            # Only stack if the key is valid in all observations
-            if valid and len(values) == len(all_observations):
-                try:
-                    stacked_observations[key] = torch.stack(values, dim=1)
-                except Exception as e:
-                    skipped_keys.append((key, f"stack failed: {e}"))
-        
-        if skipped_keys:
-            logging.warning(
-                f"Skipped {len(skipped_keys)} observation keys during stacking: "
-                f"{', '.join([f'{k} ({reason})' for k, reason in skipped_keys[:10]])}"
-                f"{'...' if len(skipped_keys) > 10 else ''}"
-            )
+        for key in all_observations[0]:
+            stacked_observations[key] = torch.stack([obs[key] for obs in all_observations], dim=1)
         ret[OBS_STR] = stacked_observations
 
     if hasattr(policy, "use_original_modules"):
