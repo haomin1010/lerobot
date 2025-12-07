@@ -236,8 +236,6 @@ def rollout(
     }
     if return_observations:
         stacked_observations = {}
-        print("---------")
-        print(all_observations[0])
         for key in all_observations[0]:
             stacked_observations[key] = torch.stack([obs[key] for obs in all_observations], dim=1)
         ret[OBS_STR] = stacked_observations
