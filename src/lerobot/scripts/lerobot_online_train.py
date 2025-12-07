@@ -328,9 +328,13 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
     # Create environment for data collection
     if is_main_process:
         logging.info("Creating environment for data collection")
-    collect_env = make_env(
+    collect_env_dict = make_env(
         cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs
     )
+    # Extract VectorEnv from dict structure {suite_name: {task_id: vec_env}}
+    suite_name = list(collect_env_dict.keys())[0]
+    task_id = list(collect_env_dict[suite_name].keys())[0]
+    collect_env = collect_env_dict[suite_name][task_id]
 
     # Create or load datasets
     offline_dataset = None
@@ -593,8 +597,7 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
             logging.info("Created dataloader for offline dataset")
 
     # Create dataloader for online dataset
-    #online_dataloader = create_dataloader(online_dataset)
-    online_dataloader = create_dataloader(offline_dataset)
+    online_dataloader = create_dataloader(online_dataset)
     if is_main_process:
         logging.info("Created dataloader for online dataset")
 
@@ -872,8 +875,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
         if wandb_logger:
             wandb_logger.log_policy(checkpoint_dir)
 
-    if collect_env:
-        close_envs(collect_env)
+    if collect_env_dict:
+        close_envs(collect_env_dict)
 
     if is_main_process:
         logging.info("End of online training")
