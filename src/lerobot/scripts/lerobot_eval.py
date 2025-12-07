@@ -243,8 +243,25 @@ def rollout(
     }
     if return_observations:
         stacked_observations = {}
-        for key in all_observations[0]:
-            stacked_observations[key] = torch.stack([obs[key] for obs in all_observations], dim=1)
+        # Collect all keys that appear in all observations
+        all_keys = set()
+        for obs in all_observations:
+            all_keys.update(obs.keys())
+        
+        # Only stack keys that are present in all observations and are not None
+        for key in all_keys:
+            # Check if key exists and is not None in all observations
+            values = []
+            valid = True
+            for obs in all_observations:
+                if key not in obs or obs[key] is None:
+                    valid = False
+                    break
+                values.append(obs[key])
+            
+            # Only stack if the key is valid in all observations
+            if valid and len(values) == len(all_observations):
+                stacked_observations[key] = torch.stack(values, dim=1)
         ret[OBS_STR] = stacked_observations
 
     if hasattr(policy, "use_original_modules"):
