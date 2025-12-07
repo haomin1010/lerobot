@@ -248,20 +248,37 @@ def rollout(
         for obs in all_observations:
             all_keys.update(obs.keys())
         
-        # Only stack keys that are present in all observations and are not None
+        skipped_keys = []
+        # Only stack keys that are present in all observations, are not None, and are Tensors
         for key in all_keys:
-            # Check if key exists and is not None in all observations
+            # Check if key exists, is not None, and is a Tensor in all observations
             values = []
             valid = True
-            for obs in all_observations:
+            for i, obs in enumerate(all_observations):
                 if key not in obs or obs[key] is None:
                     valid = False
+                    skipped_keys.append((key, f"missing or None in observation {i}"))
                     break
-                values.append(obs[key])
+                val = obs[key]
+                if not isinstance(val, torch.Tensor):
+                    valid = False
+                    skipped_keys.append((key, f"not a Tensor in observation {i}, got {type(val).__name__}"))
+                    break
+                values.append(val)
             
             # Only stack if the key is valid in all observations
             if valid and len(values) == len(all_observations):
-                stacked_observations[key] = torch.stack(values, dim=1)
+                try:
+                    stacked_observations[key] = torch.stack(values, dim=1)
+                except Exception as e:
+                    skipped_keys.append((key, f"stack failed: {e}"))
+        
+        if skipped_keys:
+            logging.warning(
+                f"Skipped {len(skipped_keys)} observation keys during stacking: "
+                f"{', '.join([f'{k} ({reason})' for k, reason in skipped_keys[:10]])}"
+                f"{'...' if len(skipped_keys) > 10 else ''}"
+            )
         ret[OBS_STR] = stacked_observations
 
     if hasattr(policy, "use_original_modules"):
