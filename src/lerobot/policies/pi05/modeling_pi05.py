@@ -1838,24 +1838,26 @@ class PI05Policy(PreTrainedPolicy):
         Check if replanning is needed based on VICReg similarity comparison.
 
         Args:
-            images: Current images
-            img_masks: Current image masks
-            tokens: Current language tokens
-            masks: Current language token masks
-            predicted_actions: Previously predicted actions [batch_size, delta_replan, action_dim]
+            images: Current images (list of tensors)
+            img_masks: Current image masks (list of tensors)
+            tokens: Current language tokens [batch_size, seq_len]
+            masks: Current language token masks [batch_size, seq_len]
+            predict_actions: Previously predicted actions [batch_size, delta_replan, action_dim]
 
         Returns:
-            tuple: (should_replan: bool, similarity: Tensor)
+            tuple: (should_replan: Tensor [batch_size], similarity: Tensor [batch_size])
         """
         delta_replan = getattr(self.config, "delta_replan", 0)
+        device = tokens.device
+        batch_size = tokens.shape[0]
         if delta_replan <= 0:
-            return False, torch.tensor(0.0)
+            return torch.zeros(batch_size, dtype=torch.bool, device=device), torch.zeros(batch_size, dtype=torch.float32, device=device)
 
         if self.model.cls_head_prefix is None or self.model.part_layer_num is None:
-            return False, torch.tensor(0.0)
+            return torch.zeros(batch_size, dtype=torch.bool, device=device), torch.zeros(batch_size, dtype=torch.float32, device=device)
 
         if self.model.content_attention is None:
-            return False, torch.tensor(0.0)
+            return torch.zeros(batch_size, dtype=torch.bool, device=device), torch.zeros(batch_size, dtype=torch.float32, device=device)
 
         device = tokens.device
         batch_size = tokens.shape[0]
@@ -1925,10 +1927,10 @@ class PI05Policy(PreTrainedPolicy):
         cmp_vec_1 = self.model.content_attention(predict_actions).to(dtype=torch.float32)
 
         # Step 3: Compute similarity
-        similarity = compute_vicreg_similarity(cmp_vec_0, cmp_vec_1)
+        similarity = compute_vicreg_similarity(cmp_vec_0, cmp_vec_1)  # [batch_size]
 
         # Decide if replanning is needed (higher similarity = more different = need replan)
-        should_replan = similarity > self._replan_threshold
+        should_replan = similarity > self._replan_threshold  # [batch_size] bool tensor
 
         return should_replan, similarity
 
@@ -1959,7 +1961,11 @@ class PI05Policy(PreTrainedPolicy):
             if not hasattr(self, "_replan_threshold"):
                 self._replan_threshold = 0.1
 
-        should_replan = True  # Default: always plan initially or when buffer is empty
+        batch_size = tokens.shape[0]
+        device = tokens.device
+        
+        # Initialize should_replan as all True (default: always plan initially or when buffer is empty)
+        should_replan = torch.ones(batch_size, dtype=torch.bool, device=device)
 
         # Check if we need to replan based on similarity comparison
         if delta_replan > 0 and self._predicted_actions_buffer is not None:
@@ -1968,26 +1974,41 @@ class PI05Policy(PreTrainedPolicy):
                 images, img_masks, tokens, masks, self._predicted_actions_buffer[:,:delta_replan,:],
             )
 
-            # Log similarity for debugging
-            if getattr(self.config, "cmp_log", False):
-                print(
-                    f"Replanning check (step {self._replan_step_counter}): "
-                    f"similarity={similarity.item():.4f}, threshold={self._replan_threshold}, "
-                    f"should_replan={should_replan}"
-                )
 
         # If replanning is needed, generate new actions
+        # Handle list indexing for images and img_masks
+        if should_replan.all():
+            # All samples need replanning, use all inputs
+            filtered_images = images
+            filtered_img_masks = img_masks
+            filtered_tokens = tokens
+            filtered_masks = masks
+        elif should_replan.any():
+            # Some samples need replanning
+            # Filter images and img_masks (they are lists)
+            filtered_images = [img[should_replan] for img in images]
+            filtered_img_masks = [mask[should_replan] for mask in img_masks]
+            filtered_tokens = tokens[should_replan]
+            filtered_masks = masks[should_replan]
 
-        images, img_masks, tokens,masks  = images[should_replan], img_masks[should_replan], tokens[should_replan], masks[should_replan]
-        actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
 
-        if self._predicted_actions_buffer is not None:
-            self._predicted_actions_buffer[should_replan] = actions
-        else:
-            self._predicted_actions_buffer = actions
+        # Generate actions only for samples that need replanning
+        if should_replan.any():
+            actions = self.model.sample_actions(filtered_images, filtered_img_masks, filtered_tokens, filtered_masks, **kwargs)
+            
+            # Update buffer for samples that were replanned
+            if self._predicted_actions_buffer is not None:
+                if should_replan.all():
+                    # All samples replanned
+                    self._predicted_actions_buffer = actions
+                else:
+                    # Partial replanning: only update replanned samples
+                    self._predicted_actions_buffer[should_replan] = actions
+            else:
+                self._predicted_actions_buffer = actions
+
 
         original_action_dim = self.config.output_features[ACTION].shape[0]
-
         return self._predicted_actions_buffer[:, :delta_replan, :original_action_dim]
 
     def forward(self, batch: dict[str, Tensor], cmp=False) -> tuple[Tensor, dict]:
