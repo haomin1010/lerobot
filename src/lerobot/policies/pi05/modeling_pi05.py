@@ -387,6 +387,40 @@ def vicreg_loss(
 
     return total_loss
 
+def compute_vicreg_similarity(
+    z1: Tensor,
+    z2: Tensor,
+    eps: float = 1e-4,
+) -> Tensor:
+    """Compute similarity based on VICReg invariance loss (L2 distance).
+
+    Args:
+        z1: First representation [batch, num_tokens, dim] or [batch, dim]
+        z2: Second representation [batch, num_tokens, dim] or [batch, dim]
+        eps: Small constant for numerical stability
+
+    Returns:
+        Similarity value (scalar tensor), lower means more similar
+        This is the mean squared L2 distance between representations
+    """
+    # Handle both 2D and 3D inputs
+    if z1.dim() == 2:
+        z1 = z1.unsqueeze(1)  # [batch, dim] -> [batch, 1, dim]
+    if z2.dim() == 2:
+        z2 = z2.unsqueeze(1)  # [batch, dim] -> [batch, 1, dim]
+
+    batch_size, num_tokens, dim = z1.shape
+
+    # Reshape to (batch*num_tokens, dim)
+    z1_flat = z1.reshape(-1, dim)  # [batch*num_tokens, dim]
+    z2_flat = z2.reshape(-1, dim)  # [batch*num_tokens, dim]
+
+    # Compute mean squared L2 distance (invariance loss component)
+    similarity = torch.mean(torch.square(z1_flat - z2_flat), dim=-1)  # [batch*num_tokens]
+    similarity = torch.mean(similarity)  # scalar
+
+    return similarity
+
 class GemmaConfig:  # see openpi `gemma.py: Config`
     """Configuration for Gemma model variants."""
 
@@ -815,7 +849,7 @@ class SingleHeadContentAttention(nn.Module):
     输出: 分类头对应的输出 [batch_size, hidden_dim]
     """
 
-    def __init__(self, hidden_dim: int, attn_act_len: int):
+    def __init__(self, hidden_dim: int, input_dim: int, attn_act_len: int):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.attn_act_len = attn_act_len
@@ -823,6 +857,7 @@ class SingleHeadContentAttention(nn.Module):
         # 可学习的分类头（query）
         self.class_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
 
+        self.in_proj = nn.Linear(input_dim, hidden_dim)
         # 单头注意力层（简单设计，层数不多）
         self.q_proj = nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -849,14 +884,15 @@ class SingleHeadContentAttention(nn.Module):
                 f"Expected suffix_outs to have {self.attn_act_len} tokens in dim 1, "
                 f"but got {suffix_outs.shape[1]}"
             )
-        if suffix_outs.shape[2] != self.hidden_dim:
+        if suffix_outs.shape[2] != self.input_dim:
             raise ValueError(
-                f"Expected suffix_outs to have hidden_dim={self.hidden_dim} in dim 2, "
+                f"Expected suffix_outs to have input_dim={self.hidden_dim} in dim 2, "
                 f"but got {suffix_outs.shape[2]}"
             )
 
         # 使用 suffix_outs 作为 keys 和 values: [batch_size, attn_act_len, hidden_dim]
-        keys_values = suffix_outs
+        keys_values = self.in_proj(suffix_outs)
+
 
         # 准备 query（分类头）
         query = self.class_token.expand(batch_size, -1, -1)  # [batch_size, 1, hidden_dim]
@@ -913,6 +949,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         if attn_act_len is not None and attn_act_len > 0:
             self.content_attention = SingleHeadContentAttention(
                 hidden_dim=action_expert_config.width,
+                input_dim=config.max_action_dim,
                 attn_act_len=attn_act_len,
             )
         else:
@@ -1155,7 +1192,6 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             img_masks,
             tokens,
             masks,
-            actions,
             lambda_param: float = 25.0,
             mu_param: float = 25.0,
             nu_param: float = 1.0,
@@ -1258,6 +1294,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         # 首先需要将 actions 投影到 hidden_dim，然后组织成 [batch_size, attn_act_len, hidden_dim] 的格式
         attn_act_len = self.content_attention.attn_act_len
 
+        actions = self.sample_actions(images, img_masks, tokens, masks)
+
         # 处理 actions：如果 actions 是 [batch_size, chunk_size, action_dim]，需要 pad 到 max_action_dim
         if actions.shape[-1] < self.config.max_action_dim:
             # Pad actions to max_action_dim if needed
@@ -1274,11 +1312,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         # 选择前 attn_act_len 个 action steps
         selected_actions = actions_padded[:, :attn_act_len, :]  # [batch_size, attn_act_len, max_action_dim]
 
-        # 投影 actions 到 hidden_dim
-        action_proj = self.action_in_proj(selected_actions)  # [batch_size, attn_act_len, hidden_dim]
-
         # 通过 SingleHeadContentAttention 得到 cmp_vec_1
-        cmp_vec_1 = self.content_attention(action_proj)  # [batch_size, hidden_dim]
+        cmp_vec_1 = self.content_attention(selected_actions)  # [batch_size, hidden_dim]
         cmp_vec_1 = cmp_vec_1.to(dtype=torch.float32)  # 转换为 float32 用于损失计算
 
         # 确保维度匹配
@@ -1785,27 +1820,177 @@ class PI05Policy(PreTrainedPolicy):
 
         # Action queue logic for n_action_steps > 1
         if len(self._action_queue) == 0:
-            actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
+            actions = self.predict_action_chunk(batch)
             # Transpose to get shape (n_action_steps, batch_size, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
 
         return self._action_queue.popleft()
 
+    def _should_replan(
+        self,
+        images,
+        img_masks,
+        tokens,
+        masks,
+        predict_actions: Tensor,
+    ) -> tuple[bool, Tensor]:
+        """
+        Check if replanning is needed based on VICReg similarity comparison.
+
+        Args:
+            images: Current images
+            img_masks: Current image masks
+            tokens: Current language tokens
+            masks: Current language token masks
+            predicted_actions: Previously predicted actions [batch_size, delta_replan, action_dim]
+
+        Returns:
+            tuple: (should_replan: bool, similarity: Tensor)
+        """
+        delta_replan = getattr(self.config, "delta_replan", 0)
+        if delta_replan <= 0:
+            return False, torch.tensor(0.0)
+
+        if self.model.cls_head_prefix is None or self.model.part_layer_num is None:
+            return False, torch.tensor(0.0)
+
+        if self.model.content_attention is None:
+            return False, torch.tensor(0.0)
+
+        device = tokens.device
+        batch_size = tokens.shape[0]
+
+        # Step 1: Get cmp_vec_0 from current visual-language information
+        # Prepare prefix embeddings with cls_head_prefix
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.model.embed_prefix(
+            images, img_masks, tokens, masks
+        )
+
+        cls_head = self.model.cls_head_prefix.expand(batch_size, -1, -1).to(
+            dtype=prefix_embs.dtype
+        )
+        prefix_embs_with_cls = torch.cat([cls_head, prefix_embs], dim=1)
+
+        # Update masks
+        cls_pad_mask = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
+        prefix_pad_masks_with_cls = torch.cat([cls_pad_mask, prefix_pad_masks], dim=1)
+
+        cls_att_mask = torch.tensor([0], dtype=torch.bool, device=device)
+        prefix_att_masks_with_cls = torch.cat(
+            [cls_att_mask.unsqueeze(0).expand(batch_size, -1), prefix_att_masks], dim=1
+        )
+
+        # Prepare dummy suffix
+        action_expert_config = get_gemma_config(self.config.action_expert_variant)
+        dummy_suffix_embs = torch.zeros(
+            batch_size,
+            1,
+            action_expert_config.width,
+            dtype=prefix_embs_with_cls.dtype,
+            device=device,
+        )
+        dummy_suffix_pad_masks = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
+        dummy_suffix_att_masks = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
+
+        # Merge masks
+        pad_masks = torch.cat([prefix_pad_masks_with_cls, dummy_suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks_with_cls, dummy_suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        att_2d_masks_4d = self.model._prepare_attention_masks_4d(att_2d_masks)
+
+        # Execute forward_partial
+        intermediate_embeds, _ = self.model.paligemma_with_expert.forward_partial(
+            attention_mask=att_2d_masks_4d,
+            position_ids=position_ids,
+            inputs_embeds=[prefix_embs_with_cls, dummy_suffix_embs],
+            use_cache=False,
+            adarms_cond=[None, None],
+            part_layer_num=self.model.part_layer_num,
+        )
+
+        # Extract cls head output
+        cmp_vec_0 = intermediate_embeds[0][:, 0, :].to(dtype=torch.float32)  # [batch_size, hidden_dim]
+
+        # Step 2: Get cmp_vec_1 from predicted actions
+        attn_act_len = self.model.content_attention.attn_act_len
+
+
+        # Select first attn_act_len actions
+        predict_actions = predict_actions[:, :attn_act_len, :]
+
+
+        # Get cmp_vec_1
+        cmp_vec_1 = self.model.content_attention(predict_actions).to(dtype=torch.float32)
+
+        # Step 3: Compute similarity
+        similarity = compute_vicreg_similarity(cmp_vec_0, cmp_vec_1)
+
+        # Decide if replanning is needed (higher similarity = more different = need replan)
+        should_replan = similarity.item() > self._replan_threshold
+
+        return should_replan, similarity
+
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
+        """Predict a chunk of actions given environment observations with replanning support.
+
+        Replanning logic:
+        - Initially: directly predict actions
+        - After that: every delta_replan steps, compare current observation with predicted actions
+        - If similarity > threshold (0.1): replan (generate new actions)
+        - If similarity <= threshold: continue using previous predictions
+        """
         self.eval()
 
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
-        # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
-        actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
+        delta_replan = getattr(self.config, "delta_replan", 0)
 
-        # Unpad actions to actual action dimension
-        original_action_dim = self.config.output_features[ACTION].shape[0]
-        actions = actions[:, :, :original_action_dim]
+        # Initialize replanning state if not exists
+        if delta_replan > 0:
+            if not hasattr(self, "_replan_step_counter"):
+                self._replan_step_counter = 0
+            if not hasattr(self, "_predicted_actions_buffer"):
+                self._predicted_actions_buffer = None
+            if not hasattr(self, "_replan_threshold"):
+                self._replan_threshold = 0.1
+
+        should_replan = True  # Default: always plan initially or when buffer is empty
+
+        # Check if we need to replan based on similarity comparison
+        if delta_replan > 0 and self._predicted_actions_buffer is not None:
+            # Check every delta_replan steps
+            should_replan, similarity = self._should_replan(
+                images, img_masks, tokens, masks, self._predicted_actions_buffer[:,:delta_replan,:],
+            )
+
+            # Log similarity for debugging
+            if getattr(self.config, "cmp_log", False):
+                print(
+                    f"Replanning check (step {self._replan_step_counter}): "
+                    f"similarity={similarity.item():.4f}, threshold={self._replan_threshold}, "
+                    f"should_replan={should_replan}"
+                )
+
+        # If replanning is needed, generate new actions
+        if should_replan:
+            actions, action_features = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
+            self._action_features_buffer = action_features
+
+            original_action_dim = self.config.output_features[ACTION].shape[0]
+            self._predicted_actions_buffer = actions[:, delta_replan:, :].clone()
+            actions = actions[:, :delta_replan, :original_action_dim]
+
+
+        else:
+            original_action_dim = self.config.output_features[ACTION].shape[0]
+            actions = self._predicted_actions_buffer[:, :delta_replan, :original_action_dim]
+            self._predicted_actions_buffer = self._predicted_actions_buffer[:,delta_replan:,:]
+
 
         return actions
 
@@ -1825,7 +2010,7 @@ class PI05Policy(PreTrainedPolicy):
             # Compute loss (no separate state needed for PI05)
             losses = self.model.forward(images, img_masks, tokens, masks, actions)
         else:
-            losses = self.model.forward_cmp(images, img_masks, tokens, masks, actions)
+            losses = self.model.forward_cmp(images, img_masks, tokens, masks)
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]

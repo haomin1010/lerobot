@@ -89,6 +89,8 @@ class PI05Config(PreTrainedConfig):
 
     part_layer_num: int = 6
     attn_act_len: int = 10
+    delta_replan = 10
+    cmp_log = False
 
     def __post_init__(self):
         super().__post_init__()
