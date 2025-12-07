@@ -948,7 +948,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         attn_act_len = getattr(config, "attn_act_len", None)
         if attn_act_len is not None and attn_act_len > 0:
             self.content_attention = SingleHeadContentAttention(
-                hidden_dim=paligemma_config.width,
+                hidden_dim=action_expert_config.width,
                 input_dim=config.max_action_dim,
                 attn_act_len=attn_act_len,
             )
@@ -969,10 +969,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         # 投影头：将 paligemma 的 hidden_dim (2048) 投影到 action_expert 的 hidden_dim (1024)
         # 用于对比学习中的维度匹配
         self.cmp_projection = nn.Sequential(
-            nn.Linear(paligemma_config.width, action_expert_config.width),
-            nn.LayerNorm(action_expert_config.width),
+            nn.Linear(paligemma_config.width, paligemma_config.width),
+            nn.LayerNorm(paligemma_config.width),
             nn.GELU(),
-            nn.Linear(action_expert_config.width, action_expert_config.width),
+            nn.Linear(paligemma_config.width, action_expert_config.width),
         )
 
         # Initialize gradient checkpointing flag
@@ -1914,6 +1914,7 @@ class PI05Policy(PreTrainedPolicy):
 
         # Extract cls head output
         cmp_vec_0 = intermediate_embeds[0][:, 0, :].to(dtype=torch.float32)  # [batch_size, hidden_dim]
+        cmp_vec_0 = self.model.cmp_projection(cmp_vec_0)
 
         # Step 2: Get cmp_vec_1 from predicted actions
         attn_act_len = self.model.content_attention.attn_act_len
