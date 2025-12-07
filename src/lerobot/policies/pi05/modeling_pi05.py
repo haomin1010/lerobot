@@ -1289,7 +1289,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         # 从中间输出中提取分类头对应的输出（第一个 token）
         cmp_vec_0 = intermediate_embeds[0][:, 0, :]  # [batch_size, paligemma_hidden_dim]
         # 通过投影头将 cmp_vec_0 从 paligemma 的维度投影到 action_expert 的维度
-        cmp_vec_0 = self.cmp_projection(cmp_vec_0)  # [batch_size, action_expert_hidden_dim]
+        cmp_vec_0 = self.model.cmp_projection(cmp_vec_0)  # [batch_size, action_expert_hidden_dim]
         cmp_vec_0 = cmp_vec_0.to(dtype=torch.float32)  # 转换为 float32 用于损失计算
 
         # 确保维度正确
