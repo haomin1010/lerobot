@@ -521,6 +521,18 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
     # Create environment-specific processors
     env_preprocessor, env_postprocessor = make_env_pre_post_processors(env_cfg=cfg.env)
 
+    # Create separate preprocessor for data collection (without normalizer)
+    # This matches lerobot_eval.py's approach - we want raw data, not normalized data
+    collect_preprocessor_overrides = {
+        "device_processor": {"device": device.type},
+        "rename_observations_processor": {"rename_map": cfg.rename_map},
+    }
+    collect_preprocessor, collect_postprocessor = make_pre_post_processors(
+        policy_cfg=cfg.policy,
+        pretrained_path=cfg.policy.pretrained_path,
+        preprocessor_overrides=collect_preprocessor_overrides,
+    )
+
     if is_main_process:
         logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
@@ -660,8 +672,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 policy=accelerator.unwrap_model(policy),
                 env_preprocessor=env_preprocessor,
                 env_postprocessor=env_postprocessor,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
+                preprocessor=collect_preprocessor,  # Use collect_preprocessor (without normalizer)
+                postprocessor=collect_postprocessor,  # Use collect_postprocessor (without unnormalizer)
                 n_episodes=cfg.online.collect_episodes_per_iteration,
                 start_seed=cfg.seed if cfg.seed is not None else None,
                 start_episode_index=current_episode_count,
