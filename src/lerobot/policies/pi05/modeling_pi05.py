@@ -1919,8 +1919,9 @@ class PI05Policy(PreTrainedPolicy):
         )
 
         # Extract cls head output
-        cmp_vec_0 = intermediate_embeds[0][:, 0, :].to(dtype=torch.float32)  # [batch_size, hidden_dim]
-        cmp_vec_0 = self.model.cmp_projection(cmp_vec_0)
+        cmp_vec_0 = intermediate_embeds[0][:, 0, :]  # [batch_size, paligemma_hidden_dim]
+        cmp_vec_0 = self.cmp_projection(cmp_vec_0)  # [batch_size, action_expert_hidden_dim]
+        cmp_vec_0 = cmp_vec_0.to(dtype=torch.float32)
 
         # Step 2: Get cmp_vec_1 from predicted actions
         attn_act_len = self.model.content_attention.attn_act_len
@@ -1938,7 +1939,8 @@ class PI05Policy(PreTrainedPolicy):
 
         # Decide if replanning is needed (higher similarity = more different = need replan)
         should_replan = similarity > self._replan_threshold  # [batch_size] bool tensor
-
+        print("------------------------")
+        print(similarity)
         return should_replan, similarity
 
     @torch.no_grad()
