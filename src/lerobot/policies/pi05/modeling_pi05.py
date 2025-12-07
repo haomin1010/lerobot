@@ -852,6 +852,7 @@ class SingleHeadContentAttention(nn.Module):
     def __init__(self, hidden_dim: int, input_dim: int, attn_act_len: int):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.input_dim = input_dim
         self.attn_act_len = attn_act_len
 
         # 可学习的分类头（query）
@@ -871,7 +872,7 @@ class SingleHeadContentAttention(nn.Module):
         """前向传播。
 
         Args:
-            suffix_outs: Tensor with shape [batch_size, attn_act_len, hidden_dim]
+            suffix_outs: Tensor with shape [batch_size, attn_act_len, input_dim]
 
         Returns:
             output: [batch_size, hidden_dim] - 分类头对应的输出
@@ -886,7 +887,7 @@ class SingleHeadContentAttention(nn.Module):
             )
         if suffix_outs.shape[2] != self.input_dim:
             raise ValueError(
-                f"Expected suffix_outs to have input_dim={self.hidden_dim} in dim 2, "
+                f"Expected suffix_outs to have input_dim={self.input_dim} in dim 2, "
                 f"but got {suffix_outs.shape[2]}"
             )
 
@@ -1978,8 +1979,7 @@ class PI05Policy(PreTrainedPolicy):
 
         # If replanning is needed, generate new actions
         if should_replan:
-            actions, action_features = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
-            self._action_features_buffer = action_features
+            actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
 
             original_action_dim = self.config.output_features[ACTION].shape[0]
             self._predicted_actions_buffer = actions[:, delta_replan:, :].clone()

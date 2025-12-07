@@ -544,8 +544,8 @@ def eval_main(cfg: EvalPipelineConfig):
             preprocessor=preprocessor,
             postprocessor=postprocessor,
             n_episodes=cfg.eval.n_episodes,
-            max_episodes_rendered=10,
-            videos_dir=Path(cfg.output_dir) / "videos",
+            max_episodes_rendered=cfg.eval.max_episodes_rendered,
+            videos_dir=Path(cfg.output_dir) / "videos" if cfg.eval.max_episodes_rendered > 0 else None,
             start_seed=cfg.seed,
             max_parallel_tasks=cfg.env.max_parallel_tasks,
         )
