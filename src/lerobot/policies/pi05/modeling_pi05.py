@@ -412,12 +412,11 @@ def compute_vicreg_similarity(
     batch_size, num_tokens, dim = z1.shape
 
     # Reshape to (batch*num_tokens, dim)
-    z1_flat = z1.reshape(-1, dim)  # [batch*num_tokens, dim]
-    z2_flat = z2.reshape(-1, dim)  # [batch*num_tokens, dim]
+    z1_flat = z1.reshape(batch_size, -1)  # [batch*num_tokens, dim]
+    z2_flat = z2.reshape(batch_size, -1)  # [batch*num_tokens, dim]
 
     # Compute mean squared L2 distance (invariance loss component)
-    similarity = torch.mean(torch.square(z1_flat - z2_flat), dim=-1)  # [batch*num_tokens]
-    similarity = torch.mean(similarity)  # scalar
+    similarity = torch.mean(torch.square(z1_flat - z2_flat), dim=-1)  # [batch]
 
     return similarity
 
@@ -1834,7 +1833,7 @@ class PI05Policy(PreTrainedPolicy):
         tokens,
         masks,
         predict_actions: Tensor,
-    ) -> tuple[bool, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Check if replanning is needed based on VICReg similarity comparison.
 
@@ -1929,7 +1928,7 @@ class PI05Policy(PreTrainedPolicy):
         similarity = compute_vicreg_similarity(cmp_vec_0, cmp_vec_1)
 
         # Decide if replanning is needed (higher similarity = more different = need replan)
-        should_replan = similarity.item() > self._replan_threshold
+        should_replan = similarity > self._replan_threshold
 
         return should_replan, similarity
 
@@ -1978,21 +1977,18 @@ class PI05Policy(PreTrainedPolicy):
                 )
 
         # If replanning is needed, generate new actions
-        if should_replan:
-            actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
 
-            original_action_dim = self.config.output_features[ACTION].shape[0]
-            self._predicted_actions_buffer = actions[:, delta_replan:, :].clone()
-            actions = actions[:, :delta_replan, :original_action_dim]
+        images, img_masks, tokens,masks  = images[should_replan], img_masks[should_replan], tokens[should_replan], masks[should_replan]
+        actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
 
-
+        if self._predicted_actions_buffer is not None:
+            self._predicted_actions_buffer[should_replan] = actions
         else:
-            original_action_dim = self.config.output_features[ACTION].shape[0]
-            actions = self._predicted_actions_buffer[:, :delta_replan, :original_action_dim]
-            self._predicted_actions_buffer = self._predicted_actions_buffer[:,delta_replan:,:]
+            self._predicted_actions_buffer = actions
 
+        original_action_dim = self.config.output_features[ACTION].shape[0]
 
-        return actions
+        return self._predicted_actions_buffer[:, :delta_replan, :original_action_dim]
 
     def forward(self, batch: dict[str, Tensor], cmp=False) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
