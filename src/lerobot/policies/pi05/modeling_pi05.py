@@ -948,7 +948,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         attn_act_len = getattr(config, "attn_act_len", None)
         if attn_act_len is not None and attn_act_len > 0:
             self.content_attention = SingleHeadContentAttention(
-                hidden_dim=action_expert_config.width,
+                hidden_dim=paligemma_config.width,
                 input_dim=config.max_action_dim,
                 attn_act_len=attn_act_len,
             )
