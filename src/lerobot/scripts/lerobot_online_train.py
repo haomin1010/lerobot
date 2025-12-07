@@ -593,7 +593,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
             logging.info("Created dataloader for offline dataset")
 
     # Create dataloader for online dataset
-    online_dataloader = create_dataloader(online_dataset)
+    #online_dataloader = create_dataloader(online_dataset)
+    online_dataloader = create_dataloader(offline_dataset)
     if is_main_process:
         logging.info("Created dataloader for online dataset")
 
