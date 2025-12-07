@@ -968,19 +968,13 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         # 投影头：将 paligemma 的 hidden_dim (2048) 投影到 action_expert 的 hidden_dim (1024)
         # 用于对比学习中的维度匹配
-        # self.cmp_projection = nn.Sequential(
-        #     nn.Linear(paligemma_config.width, paligemma_config.width),
-        #     nn.LayerNorm(paligemma_config.width),
-        #     nn.GELU(),
-        #     nn.Linear(paligemma_config.width, action_expert_config.width),
-        # )
-
         self.cmp_projection = nn.Sequential(
-            nn.Linear(paligemma_config.width, action_expert_config.width),
-            nn.LayerNorm(action_expert_config.width),
+            nn.Linear(paligemma_config.width, paligemma_config.width),
+            nn.LayerNorm(paligemma_config.width),
             nn.GELU(),
-            nn.Linear(action_expert_config.width, action_expert_config.width),
+            nn.Linear(paligemma_config.width, action_expert_config.width),
         )
+
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
 
