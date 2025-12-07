@@ -340,7 +340,7 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
         logging.info("Creating/loading datasets")
         
         # Load offline dataset if specified
-        if cfg.start_with_offline_dataset:
+        if cfg.online.start_with_offline_dataset:
             logging.info("Loading offline dataset for training")
             offline_dataset = make_dataset(cfg)
             logging.info(
@@ -349,8 +349,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
             )
         
         # Create or load online dataset for collecting new episodes
-        online_dataset_repo_id = cfg.online_dataset_repo_id or cfg.dataset.repo_id
-        online_dataset_root = cfg.online_dataset_root or cfg.dataset.root
+        online_dataset_repo_id = cfg.online.online_dataset_repo_id or cfg.dataset.repo_id
+        online_dataset_root = cfg.online.online_dataset_root or cfg.dataset.root
         
         # Check if online dataset already exists
         from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
@@ -448,11 +448,11 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
 
     if not is_main_process:
         # Load datasets on non-main processes
-        if cfg.start_with_offline_dataset:
+        if cfg.online.start_with_offline_dataset:
             offline_dataset = make_dataset(cfg)
         
-        online_dataset_repo_id = cfg.online_dataset_repo_id or cfg.dataset.repo_id
-        online_dataset_root = cfg.online_dataset_root or cfg.dataset.root
+        online_dataset_repo_id = cfg.online.online_dataset_repo_id or cfg.dataset.repo_id
+        online_dataset_root = cfg.online.online_dataset_root or cfg.dataset.root
         try:
             online_dataset = LeRobotDataset(
                 online_dataset_repo_id,
