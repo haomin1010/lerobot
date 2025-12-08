@@ -728,25 +728,38 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
         if is_main_process:
             logging.info("Created dataloader for offline dataset")
 
-    # Create dataloader for online dataset
-    online_dataloader = create_dataloader(online_dataset)
-    if is_main_process:
-        logging.info("Created dataloader for online dataset")
+    # Create dataloader for online dataset (only if it has data)
+    online_dataloader = None
+    online_dl_iter = None
+    if online_dataset.num_frames > 0:
+        online_dataloader = create_dataloader(online_dataset)
+        if is_main_process:
+            logging.info("Created dataloader for online dataset")
+    else:
+        if is_main_process:
+            logging.info("Online dataset is empty, dataloader will be created after first data collection")
 
     # Prepare everything with accelerator
     accelerator.wait_for_everyone()
     prepare_list = [policy, optimizer, lr_scheduler]
     if offline_dataloader is not None:
         prepare_list.append(offline_dataloader)
-    prepare_list.append(online_dataloader)
+    if online_dataloader is not None:
+        prepare_list.append(online_dataloader)
     
     prepared = accelerator.prepare(*prepare_list)
-    if offline_dataloader is not None:
+    if offline_dataloader is not None and online_dataloader is not None:
         policy, optimizer, lr_scheduler, offline_dataloader, online_dataloader = prepared
         offline_dl_iter = cycle(offline_dataloader)
-    else:
+        online_dl_iter = cycle(online_dataloader)
+    elif offline_dataloader is not None:
+        policy, optimizer, lr_scheduler, offline_dataloader = prepared
+        offline_dl_iter = cycle(offline_dataloader)
+    elif online_dataloader is not None:
         policy, optimizer, lr_scheduler, online_dataloader = prepared
-    online_dl_iter = cycle(online_dataloader)
+        online_dl_iter = cycle(online_dataloader)
+    else:
+        policy, optimizer, lr_scheduler = prepared
 
     policy.train()
 
@@ -864,9 +877,14 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
             offline_dataloader = accelerator.prepare(offline_dataloader)
             offline_dl_iter = cycle(offline_dataloader)
         
-        online_dataloader = create_dataloader(online_dataset)
-        online_dataloader = accelerator.prepare(online_dataloader)
-        online_dl_iter = cycle(online_dataloader)
+        # Only create online dataloader if dataset has data
+        if online_dataset.num_frames > 0:
+            online_dataloader = create_dataloader(online_dataset)
+            online_dataloader = accelerator.prepare(online_dataloader)
+            online_dl_iter = cycle(online_dataloader)
+        else:
+            if is_main_process:
+                logging.warning("Online dataset is still empty, skipping dataloader creation")
 
         # Check if we have enough episodes to start training
         # Count total episodes: offline + online
@@ -943,7 +961,7 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                     train_tracker.step()
 
             # Step 2: Train on online dataset with cmp=True (if available)
-            if online_dataset.num_episodes > 0:
+            if online_dataset.num_episodes > 0 and online_dataloader is not None:
                 try:
                     start_time = time.perf_counter()
                     online_batch = next(online_dl_iter)
