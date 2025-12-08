@@ -43,6 +43,7 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 from termcolor import colored
@@ -325,7 +326,21 @@ def add_episodes_to_dataset(
         # Add all observation keys (only those starting with "observation.")
         for key in episode_data:
             if key.startswith(f"{OBS_STR}."):
-                frame_dict[key] = episode_data[key][frame_idx]
+                value = episode_data[key][frame_idx]
+                frame_dict[key] = value
+                
+                # Log image shape for debugging
+                if frame_idx == 0 and key in online_dataset.features:
+                    feat = online_dataset.features[key]
+                    if feat.get("dtype") in ["image", "video"]:
+                        if isinstance(value, torch.Tensor):
+                            value_np = value.cpu().numpy()
+                        else:
+                            value_np = value
+                        logging.info(
+                            f"Image feature '{key}': actual_shape={value_np.shape if isinstance(value_np, np.ndarray) else type(value_np)}, "
+                            f"expected_shape={feat.get('shape')}, names={feat.get('names')}, dtype={feat.get('dtype')}"
+                        )
 
         # Add next.success if available (as complementary_info)
         if "next.success" in episode_data:
@@ -337,6 +352,12 @@ def add_episodes_to_dataset(
                     frame_dict["complementary_info.success"] = success_value
             else:
                 frame_dict["complementary_info.success"] = success_value
+
+        # Log frame_dict keys and dataset features for first frame
+        if frame_idx == 0:
+            logging.info(f"Frame dict keys: {sorted(frame_dict.keys())}")
+            logging.info(f"Dataset expected features (excluding DEFAULT_FEATURES): {sorted(set(online_dataset.features.keys()) - {'timestamp', 'frame_index', 'episode_index', 'index', 'task_index'})}")
+            logging.info(f"Extra keys in frame_dict (not in dataset features): {sorted(set(frame_dict.keys()) - {'task'} - set(online_dataset.features.keys()))}")
 
         # Check if we need to save episode before adding frame (episode boundary)
         episode_index = episode_data["episode_index"][frame_idx].item()
