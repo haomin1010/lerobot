@@ -39,16 +39,23 @@ lerobot-online-train \
 import logging
 import time
 from contextlib import nullcontext
+from collections.abc import Callable
 from pathlib import Path
 from pprint import pformat
 from typing import Any
+from tqdm import trange
+from copy import deepcopy
 
+import einops
+import gymnasium as gym
 import numpy as np
 import torch
+from torch import nn
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
 
+from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.configs import parser
 from lerobot.configs.train import OnlineTrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
@@ -56,7 +63,6 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
-from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
@@ -74,7 +80,176 @@ from lerobot.utils.utils import (
     format_big_number,
     has_method,
     init_logging,
+    inside_slurm,
 )
+from lerobot.envs.utils import (
+    add_envs_task,
+    check_env_attributes_and_types,
+    close_envs,
+    preprocess_observation,
+)
+
+
+def rollout(
+        env: gym.vector.VectorEnv,
+        policy: PreTrainedPolicy,
+        env_preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+        env_postprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+        preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+        postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+        seeds: list[int] | None = None,
+        return_observations: bool = False,
+        render_callback: Callable[[gym.vector.VectorEnv], None] | None = None,
+) -> dict:
+    """Run a batched policy rollout once through a batch of environments.
+
+    Note that all environments in the batch are run until the last environment is done. This means some
+    data will probably need to be discarded (for environments that aren't the first one to be done).
+
+    The return dictionary contains:
+        (optional) "observation": A dictionary of (batch, sequence + 1, *) tensors mapped to observation
+            keys. NOTE that this has an extra sequence element relative to the other keys in the
+            dictionary. This is because an extra observation is included for after the environment is
+            terminated or truncated.
+        "action": A (batch, sequence, action_dim) tensor of actions applied based on the observations (not
+            including the last observations).
+        "reward": A (batch, sequence) tensor of rewards received for applying the actions.
+        "success": A (batch, sequence) tensor of success conditions (the only time this can be True is upon
+            environment termination/truncation).
+        "done": A (batch, sequence) tensor of **cumulative** done conditions. For any given batch element,
+            the first True is followed by True's all the way till the end. This can be used for masking
+            extraneous elements from the sequences above.
+
+    Args:
+        env: The batch of environments.
+        policy: The policy. Must be a PyTorch nn module.
+        seeds: The environments are seeded once at the start of the rollout. If provided, this argument
+            specifies the seeds for each of the environments.
+        return_observations: Whether to include all observations in the returned rollout data. Observations
+            are returned optionally because they typically take more memory to cache. Defaults to False.
+        render_callback: Optional rendering callback to be used after the environments are reset, and after
+            every step.
+    Returns:
+        The dictionary described above.
+    """
+    assert isinstance(policy, nn.Module), "Policy must be a PyTorch nn module."
+
+    # Reset the policy and environments.
+    policy.reset()
+    observation, info = env.reset(seed=seeds)
+    if render_callback is not None:
+        render_callback(env)
+
+    all_observations = []
+    all_actions = []
+    all_rewards = []
+    all_successes = []
+    all_dones = []
+
+    step = 0
+    # Keep track of which environments are done.
+    done = np.array([False] * env.num_envs)
+    max_steps = env.call("_max_episode_steps")[0]
+    progbar = trange(
+        max_steps,
+        desc=f"Running rollout with at most {max_steps} steps",
+        disable=inside_slurm(),  # we dont want progress bar when we use slurm, since it clutters the logs
+        leave=False,
+    )
+    check_env_attributes_and_types(env)
+    while not np.all(done) and step < max_steps:
+        # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
+        observation = preprocess_observation(observation)
+
+        # Infer "task" from attributes of environments.
+        # TODO: works with SyncVectorEnv but not AsyncVectorEnv
+        observation = add_envs_task(env, observation)
+
+        # Apply environment-specific preprocessing (e.g., LiberoProcessorStep for LIBERO)
+        # This handles nested dictionaries (e.g., robot_state -> state)
+        observation = env_preprocessor(observation)
+
+        # Save observation AFTER env_preprocessor (nested dicts are flattened)
+        if return_observations:
+            all_observations.append(deepcopy(observation))
+
+        observation = preprocessor(observation)
+        with torch.inference_mode():
+            action = policy.select_action(observation)
+        action = postprocessor(action)
+
+        action_transition = {"action": action}
+        action_transition = env_postprocessor(action_transition)
+        action = action_transition["action"]
+
+        # Convert to CPU / numpy.
+        action_numpy: np.ndarray = action.to("cpu").numpy()
+        assert action_numpy.ndim == 2, "Action dimensions should be (batch, action_dim)"
+
+        # Apply the next action.
+        observation, reward, terminated, truncated, info = env.step(action_numpy)
+        if render_callback is not None:
+            render_callback(env)
+
+        # VectorEnv stores is_success in `info["final_info"][env_index]["is_success"]`. "final_info" isn't
+        # available if none of the envs finished.
+        if "final_info" in info:
+            final_info = info["final_info"]
+            if not isinstance(final_info, dict):
+                raise RuntimeError(
+                    "Unsupported `final_info` format: expected dict (Gymnasium >= 1.0). "
+                    "You're likely using an older version of gymnasium (< 1.0). Please upgrade."
+                )
+            successes = final_info["is_success"].tolist()
+        else:
+            successes = [False] * env.num_envs
+
+        # Keep track of which environments are done so far.
+        # Mark the episode as done if we reach the maximum step limit.
+        # This ensures that the rollout always terminates cleanly at `max_steps`,
+        # and allows logging/saving (e.g., videos) to be triggered consistently.
+        done = terminated | truncated | done
+        if step + 1 == max_steps:
+            done = np.ones_like(done, dtype=bool)
+
+        all_actions.append(torch.from_numpy(action_numpy))
+        all_rewards.append(torch.from_numpy(reward))
+        all_dones.append(torch.from_numpy(done))
+        all_successes.append(torch.tensor(successes))
+
+        step += 1
+        running_success_rate = (
+            einops.reduce(torch.stack(all_successes, dim=1), "b n -> b", "any").numpy().mean()
+        )
+        progbar.set_postfix({"running_success_rate": f"{running_success_rate.item() * 100:.1f}%"})
+        progbar.update()
+
+    # Track the final observation.
+    if return_observations:
+        observation = preprocess_observation(observation)
+        observation = add_envs_task(env, observation)
+        observation = env_preprocessor(observation)
+        all_observations.append(deepcopy(observation))
+
+    # Stack the sequence along the first dimension so that we have (batch, sequence, *) tensors.
+    ret = {
+        ACTION: torch.stack(all_actions, dim=1),
+        "reward": torch.stack(all_rewards, dim=1),
+        "success": torch.stack(all_successes, dim=1),
+        "done": torch.stack(all_dones, dim=1),
+    }
+    if return_observations:
+        stacked_observations = {}
+        # Only stack keys that start with "observation."
+        for key in all_observations[0]:
+            if key.startswith(f"{OBS_STR}."):
+                stacked_observations[key] = torch.stack([obs[key] for obs in all_observations], dim=1)
+        ret[OBS_STR] = stacked_observations
+
+    if hasattr(policy, "use_original_modules"):
+        policy.use_original_modules()
+
+    return ret
 
 
 def update_policy(
