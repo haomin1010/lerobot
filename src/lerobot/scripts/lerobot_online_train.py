@@ -391,7 +391,8 @@ def add_episodes_to_dataset(
 
     # Save the last episode if there are any remaining frames
     if total_frames > 0:
-        online_dataset.save_episode()
+        if online_dataset.episode_buffer is not None and online_dataset.episode_buffer["size"] > 0:
+            online_dataset.save_episode()
 
     logging.info(f"Added {total_frames} frames to dataset")
 
