@@ -252,32 +252,118 @@ def add_episodes_to_dataset(
 ) -> None:
     """Add collected episodes to the dataset.
 
-    This is a placeholder function. The user should implement the actual logic
-    to add episode_data to the dataset. The episode_data dictionary contains:
-    - ACTION: actions taken
-    - REWARD: rewards received
-    - DONE: done flags
-    - OBS_STR: observations (dict of observation keys)
-    - episode_index: episode indices
-    - frame_index: frame indices within episodes
-    - timestamp: timestamps
-    - index: global frame indices
+    This function converts episode_data from batch format to individual frames
+    and adds them to the dataset using add_frame() and save_episode().
 
     Args:
         online_dataset: The online dataset to add episodes to.
         episode_data: Dictionary containing episode data from collect_episodes.
+            Expected keys:
+            - ACTION: actions (total_frames, action_dim)
+            - REWARD: rewards (total_frames,)
+            - DONE: done flags (total_frames,)
+            - episode_index: episode indices (total_frames,)
+            - frame_index: frame indices within episodes (total_frames,)
+            - timestamp: timestamps (total_frames,)
+            - index: global frame indices (total_frames,)
+            - observation.*: observation keys (total_frames, ...)
+            - next.success: success flags (total_frames,) [optional]
+            - task: task names (total_frames,) [optional, if not in observation]
     """
-    # TODO: Implement the logic to add episode_data to online_dataset
-    # This should:
-    # 1. Update dataset metadata (episodes, stats, etc.)
-    # 2. Write episode data to parquet files
-    # 3. Handle video encoding if needed
-    # 4. Update dataset.hf_dataset to include new episodes
-    logging.warning(
-        "add_episodes_to_dataset is not implemented yet. "
-        "Please implement this function to add collected episodes to the dataset."
-    )
-    pass
+    if not episode_data:
+        logging.warning("episode_data is empty, nothing to add to dataset")
+        return
+
+    # Get total number of frames
+    total_frames = len(episode_data[ACTION])
+
+    # Track current episode to detect episode boundaries
+    current_episode_index = None
+
+    # Extract task information if available
+    # Task might be in episode_data directly, or in observation keys
+    task_key = None
+    if "task" in episode_data:
+        task_key = "task"
+    else:
+        # Check if task is in observation keys (it might be saved as "observation.task" or just "task")
+        for key in episode_data:
+            if key == "task" or key.endswith(".task"):
+                task_key = key
+                break
+
+    # Iterate through all frames
+    for frame_idx in range(total_frames):
+        # Create frame dictionary
+        frame_dict = {}
+
+        # Add action, reward, done
+        frame_dict[ACTION] = episode_data[ACTION][frame_idx]
+        frame_dict[REWARD] = episode_data[REWARD][frame_idx]
+        frame_dict[DONE] = episode_data[DONE][frame_idx]
+
+        # Add task (required by add_frame)
+        if task_key and task_key in episode_data:
+            task_value = episode_data[task_key][frame_idx]
+            # Task might be a list (from add_envs_task) or a string
+            if isinstance(task_value, (list, tuple)) and len(task_value) > 0:
+                frame_dict["task"] = task_value[0] if isinstance(task_value[0], str) else str(task_value[0])
+            elif isinstance(task_value, torch.Tensor):
+                # Convert tensor to string if needed
+                task_item = task_value.item() if task_value.numel() == 1 else str(task_value)
+                frame_dict["task"] = str(task_item) if not isinstance(task_item, str) else task_item
+            else:
+                frame_dict["task"] = str(task_value) if task_value else ""
+        else:
+            # Default task if not available
+            frame_dict["task"] = ""
+
+        # Add timestamp (optional, add_frame will generate if missing)
+        if "timestamp" in episode_data:
+            frame_dict["timestamp"] = episode_data["timestamp"][frame_idx].item()
+
+        # Add all observation keys (only those starting with "observation.")
+        for key in episode_data:
+            if key.startswith(f"{OBS_STR}."):
+                frame_dict[key] = episode_data[key][frame_idx]
+
+        # Add next.success if available (as complementary_info)
+        if "next.success" in episode_data:
+            success_value = episode_data["next.success"][frame_idx]
+            if isinstance(success_value, torch.Tensor):
+                if success_value.numel() == 1:
+                    frame_dict["complementary_info.success"] = success_value.item()
+                else:
+                    frame_dict["complementary_info.success"] = success_value
+            else:
+                frame_dict["complementary_info.success"] = success_value
+
+        # Check if we need to save episode before adding frame (episode boundary)
+        episode_index = episode_data["episode_index"][frame_idx].item()
+        done = frame_dict[DONE]
+
+        # Save previous episode if episode index changed (new episode started)
+        if current_episode_index is not None and episode_index != current_episode_index:
+            online_dataset.save_episode()
+
+        # Add frame to dataset
+        online_dataset.add_frame(frame_dict)
+
+        # Save episode if done flag is True (episode ended)
+        if isinstance(done, torch.Tensor):
+            if done.item():
+                online_dataset.save_episode()
+        elif done:
+            online_dataset.save_episode()
+
+        # Update current episode index
+        current_episode_index = episode_index
+
+    # Save the last episode if there are any remaining frames
+    if total_frames > 0:
+        online_dataset.save_episode()
+
+    logging.info(f"Added {total_frames} frames to dataset")
 
 
 @parser.wrap()
@@ -331,10 +417,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
     collect_env_dict = make_env(
         cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs
     )
-    # Extract VectorEnv from dict structure {suite_name: {task_id: vec_env}}
-    suite_name = list(collect_env_dict.keys())[0]
-    task_id = list(collect_env_dict[suite_name].keys())[0]
-    collect_env = collect_env_dict[suite_name][task_id]
+    # Keep the full dict to use all tasks, not just the first one
+    # Structure: {suite_name: {task_id: vec_env}}
 
     # Create or load datasets
     offline_dataset = None
@@ -672,7 +756,7 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
             logging.info(f"Iteration {iteration + 1}/{cfg.online.n_iterations}")
             logging.info(f"{'='*60}")
 
-        # Phase 1: Collect episodes
+        # Phase 1: Collect episodes from all tasks
         if is_main_process:
             logging.info(
                 f"Collecting {cfg.online.collect_episodes_per_iteration} episodes from environment"
@@ -681,17 +765,61 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
         with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
             # Get current episode count from online dataset to set correct episode indices
             current_episode_count = online_dataset.num_episodes if hasattr(online_dataset, "num_episodes") else 0
-            episode_data = collect_episodes(
-                env=collect_env,
-                policy=accelerator.unwrap_model(policy),
-                env_preprocessor=env_preprocessor,
-                env_postprocessor=env_postprocessor,
-                preprocessor=collect_preprocessor,  # Use collect_preprocessor (without normalizer)
-                postprocessor=collect_postprocessor,  # Use collect_postprocessor (without unnormalizer)
-                n_episodes=cfg.online.collect_episodes_per_iteration,
-                start_seed=cfg.seed if cfg.seed is not None else None,
-                start_episode_index=current_episode_count,
-            )
+            
+            # Collect episodes from all tasks
+            all_episode_data = []
+            total_tasks = sum(len(tasks) for tasks in collect_env_dict.values())
+            episodes_per_task = cfg.online.collect_episodes_per_iteration // total_tasks
+            remaining_episodes = cfg.online.collect_episodes_per_iteration % total_tasks
+            
+            current_ep_idx = current_episode_count
+            task_idx = 0
+            
+            for suite_name, task_dict in collect_env_dict.items():
+                for task_id, env in task_dict.items():
+                    # Distribute remaining episodes to first few tasks
+                    n_episodes_this_task = episodes_per_task + (1 if task_idx < remaining_episodes else 0)
+                    
+                    if n_episodes_this_task > 0:
+                        if is_main_process:
+                            logging.info(
+                                f"Collecting {n_episodes_this_task} episodes from {suite_name} task {task_id}"
+                            )
+                        
+                        task_episode_data = collect_episodes(
+                            env=env,
+                            policy=accelerator.unwrap_model(policy),
+                            env_preprocessor=env_preprocessor,
+                            env_postprocessor=env_postprocessor,
+                            preprocessor=collect_preprocessor,  # Use collect_preprocessor (without normalizer)
+                            postprocessor=collect_postprocessor,  # Use collect_postprocessor (without unnormalizer)
+                            n_episodes=n_episodes_this_task,
+                            start_seed=cfg.seed if cfg.seed is not None else None,
+                            start_episode_index=current_ep_idx,
+                        )
+                        
+                        if task_episode_data:
+                            all_episode_data.append(task_episode_data)
+                            # Update episode index for next task
+                            # Count unique episode indices to get the number of episodes collected
+                            if "episode_index" in task_episode_data and len(task_episode_data["episode_index"]) > 0:
+                                unique_episodes = torch.unique(task_episode_data["episode_index"])
+                                current_ep_idx = unique_episodes[-1].item() + 1
+                            else:
+                                # Fallback: increment by number of episodes collected
+                                current_ep_idx += n_episodes_this_task
+                    
+                    task_idx += 1
+            
+            # Combine all episode data
+            if len(all_episode_data) > 1:
+                episode_data = {}
+                for key in all_episode_data[0]:
+                    episode_data[key] = torch.cat([ep[key] for ep in all_episode_data])
+            elif len(all_episode_data) == 1:
+                episode_data = all_episode_data[0]
+            else:
+                episode_data = {}
 
         # Phase 2: Add episodes to online dataset
         if is_main_process:
