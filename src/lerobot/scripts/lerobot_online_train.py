@@ -470,12 +470,11 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
         online_dataset_repo_id = cfg.online.online_dataset_repo_id or cfg.dataset.repo_id
         online_dataset_root = cfg.online.online_dataset_root or cfg.dataset.root
         
-        # Check if online dataset already exists
-        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
-        try:
-            online_meta = LeRobotDatasetMetadata(
-                online_dataset_repo_id, root=online_dataset_root
-            )
+        # Check if online dataset already exists by checking for info.json
+        online_dataset_path = Path(online_dataset_root) / online_dataset_repo_id
+        online_meta_path = online_dataset_path / "meta" / "info.json"
+        
+        if online_meta_path.exists():
             # Dataset exists, load it
             logging.info(f"Loading existing online dataset: {online_dataset_repo_id}")
             online_dataset = LeRobotDataset(
@@ -487,7 +486,7 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 f"Online dataset loaded: {online_dataset.num_episodes} episodes, "
                 f"{online_dataset.num_frames} frames"
             )
-        except (FileNotFoundError, NotADirectoryError):
+        else:
             # Dataset doesn't exist, create new one
             logging.info(f"Creating new online dataset: {online_dataset_repo_id}")
             
