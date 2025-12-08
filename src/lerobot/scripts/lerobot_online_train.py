@@ -840,8 +840,6 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 fps = cfg.env.fps
                 # Convert environment features to dataset features format
                 from lerobot.envs.utils import env_to_policy_features
-                from lerobot.datasets.utils import dataset_to_policy_features
-                from lerobot.utils.constants import ACTION, REWARD, DONE
                 
                 # Get policy features from env config
                 policy_features = env_to_policy_features(cfg.env)
@@ -990,18 +988,18 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
     )
 
     # Log processor steps for debugging
-    if is_main_process:
-        from lerobot.processor.normalize_processor import NormalizerProcessorStep
-        processor_names = [type(step).__name__ for step in collect_preprocessor.steps]
-        has_normalizer = any(isinstance(step, NormalizerProcessorStep) for step in collect_preprocessor.steps)
-        logging.info(f"Collect preprocessor steps: {processor_names}")
-        logging.info(f"Collect preprocessor contains normalizer_processor: {has_normalizer}")
-        
-        # Also log training preprocessor for comparison
-        training_processor_names = [type(step).__name__ for step in preprocessor.steps]
-        training_has_normalizer = any(isinstance(step, NormalizerProcessorStep) for step in preprocessor.steps)
-        logging.info(f"Training preprocessor steps: {training_processor_names}")
-        logging.info(f"Training preprocessor contains normalizer_processor: {training_has_normalizer}")
+    # if is_main_process:
+    #     from lerobot.processor.normalize_processor import NormalizerProcessorStep
+    #     processor_names = [type(step).__name__ for step in collect_preprocessor.steps]
+    #     has_normalizer = any(isinstance(step, NormalizerProcessorStep) for step in collect_preprocessor.steps)
+    #     logging.info(f"Collect preprocessor steps: {processor_names}")
+    #     logging.info(f"Collect preprocessor contains normalizer_processor: {has_normalizer}")
+    #
+    #     # Also log training preprocessor for comparison
+    #     training_processor_names = [type(step).__name__ for step in preprocessor.steps]
+    #     training_has_normalizer = any(isinstance(step, NormalizerProcessorStep) for step in preprocessor.steps)
+    #     logging.info(f"Training preprocessor steps: {training_processor_names}")
+    #     logging.info(f"Training preprocessor contains normalizer_processor: {training_has_normalizer}")
 
     if is_main_process:
         logging.info("Creating optimizer and scheduler")
