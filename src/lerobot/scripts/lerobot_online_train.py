@@ -67,7 +67,7 @@ from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
-from lerobot.scripts.lerobot_eval import rollout, _compile_episode_data
+from lerobot.scripts.lerobot_eval import _compile_episode_data
 from lerobot.utils.constants import ACTION, DONE, OBS_STR, REWARD
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
