@@ -862,6 +862,12 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
             logging.info("Adding collected episodes to online dataset")
             add_episodes_to_dataset(online_dataset, episode_data)
 
+        # Close all writers to ensure parquet files are properly finalized before reading
+        if is_main_process:
+            online_dataset._close_writer()
+            if hasattr(online_dataset.meta, "_close_writer"):
+                online_dataset.meta._close_writer()
+
         # Wait for dataset update to complete
         accelerator.wait_for_everyone()
 
@@ -962,7 +968,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                     train_tracker.step()
 
             # Step 2: Train on online dataset with cmp=True (if available)
-            if online_dataset.num_episodes > 0 and online_dataloader is not None:
+            if (online_dataset.num_episodes > 0 and online_dataloader is not None
+                    and online_dataset.num_frames >= cfg.online.min_frames_for_online_training):
                 try:
                     start_time = time.perf_counter()
                     online_batch = next(online_dl_iter)
