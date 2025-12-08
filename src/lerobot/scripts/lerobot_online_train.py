@@ -298,10 +298,8 @@ def add_episodes_to_dataset(
         # Create frame dictionary
         frame_dict = {}
 
-        # Add action, reward, done
+        # Add action (reward and done are not in dataset features, so we don't add them)
         frame_dict[ACTION] = episode_data[ACTION][frame_idx]
-        frame_dict[REWARD] = episode_data[REWARD][frame_idx]
-        frame_dict[DONE] = episode_data[DONE][frame_idx]
 
         # Add task (required by add_frame)
         if task_key and task_key in episode_data:
@@ -319,39 +317,48 @@ def add_episodes_to_dataset(
             # Default task if not available
             frame_dict["task"] = ""
 
-        # Add timestamp (optional, add_frame will generate if missing)
-        if "timestamp" in episode_data:
-            frame_dict["timestamp"] = episode_data["timestamp"][frame_idx].item()
+        # Don't add timestamp - it's in DEFAULT_FEATURES and will be handled by add_frame automatically
 
         # Add all observation keys (only those starting with "observation.")
         for key in episode_data:
             if key.startswith(f"{OBS_STR}."):
                 value = episode_data[key][frame_idx]
-                frame_dict[key] = value
                 
-                # Log image shape for debugging
-                if frame_idx == 0 and key in online_dataset.features:
+                # Convert images from channel-first (C, H, W) to channel-last (H, W, C) if needed
+                # Dataset features expect channel-last format (H, W, C) based on names=["height", "width", "channel"]
+                if key in online_dataset.features:
                     feat = online_dataset.features[key]
                     if feat.get("dtype") in ["image", "video"]:
                         if isinstance(value, torch.Tensor):
-                            value_np = value.cpu().numpy()
-                        else:
-                            value_np = value
-                        logging.info(
-                            f"Image feature '{key}': actual_shape={value_np.shape if isinstance(value_np, np.ndarray) else type(value_np)}, "
-                            f"expected_shape={feat.get('shape')}, names={feat.get('names')}, dtype={feat.get('dtype')}"
-                        )
+                            value = value.cpu().numpy()
+                        if isinstance(value, np.ndarray) and value.ndim == 3:
+                            # Check if it's channel-first (C, H, W) - typically C=3 is small
+                            if value.shape[0] == 3 and value.shape[0] < value.shape[1] and value.shape[0] < value.shape[2]:
+                                # Convert from (C, H, W) to (H, W, C)
+                                value = np.transpose(value, (1, 2, 0))
+                        
+                        # Log image shape for debugging (first frame only)
+                        if frame_idx == 0:
+                            logging.info(
+                                f"Image feature '{key}': actual_shape={value.shape if isinstance(value, np.ndarray) else type(value)}, "
+                                f"expected_shape={feat.get('shape')}, names={feat.get('names')}, dtype={feat.get('dtype')}"
+                            )
+                
+                frame_dict[key] = value
 
-        # Add next.success if available (as complementary_info)
-        if "next.success" in episode_data:
-            success_value = episode_data["next.success"][frame_idx]
-            if isinstance(success_value, torch.Tensor):
-                if success_value.numel() == 1:
-                    frame_dict["complementary_info.success"] = success_value.item()
-                else:
-                    frame_dict["complementary_info.success"] = success_value
-            else:
-                frame_dict["complementary_info.success"] = success_value
+        # Don't add next.success as complementary_info if it's not in dataset features
+        # Only add complementary_info keys if they exist in dataset features
+        # if "next.success" in episode_data:
+        #     complementary_info_keys = [k for k in online_dataset.features if k.startswith("complementary_info.")]
+        #     if "complementary_info.success" in online_dataset.features:
+        #         success_value = episode_data["next.success"][frame_idx]
+        #         if isinstance(success_value, torch.Tensor):
+        #             if success_value.numel() == 1:
+        #                 frame_dict["complementary_info.success"] = success_value.item()
+        #             else:
+        #                 frame_dict["complementary_info.success"] = success_value
+        #         else:
+        #             frame_dict["complementary_info.success"] = success_value
 
         # Log frame_dict keys and dataset features for first frame
         if frame_idx == 0:
@@ -361,7 +368,8 @@ def add_episodes_to_dataset(
 
         # Check if we need to save episode before adding frame (episode boundary)
         episode_index = episode_data["episode_index"][frame_idx].item()
-        done = frame_dict[DONE]
+        # Get done flag from episode_data (not from frame_dict, as it's not in dataset features)
+        done = episode_data[DONE][frame_idx] if DONE in episode_data else False
 
         # Save previous episode if episode index changed (new episode started)
         if current_episode_index is not None and episode_index != current_episode_index:
