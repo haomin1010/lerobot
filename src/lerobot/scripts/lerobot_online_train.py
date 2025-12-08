@@ -50,7 +50,7 @@ import einops
 import gymnasium as gym
 import numpy as np
 import torch
-from torch import nn
+from torch import Tensor, nn
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
@@ -67,8 +67,10 @@ from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
-from lerobot.scripts.lerobot_eval import _compile_episode_data
-from lerobot.utils.constants import ACTION, DONE, OBS_STR, REWARD
+from lerobot.utils.constants import (
+    ACTION, DONE, OBS_STR, REWARD,
+    PREV_ACTIONS, PRED_ACTIONS, PREV_ACTIONS_MASK, PRED_ACTIONS_MASK,
+)
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
@@ -90,6 +92,60 @@ from lerobot.envs.utils import (
 )
 
 
+def _compile_episode_data(
+    rollout_data: dict, done_indices: Tensor, start_episode_index: int, start_data_index: int, fps: float
+) -> dict:
+    """Convenience function for `eval_policy(return_episode_data=True)`
+
+    Compiles all the rollout data into a Hugging Face dataset.
+
+    Similar logic is implemented when datasets are pushed to hub (see: `push_to_hub`).
+    """
+    ep_dicts = []
+    total_frames = 0
+    for ep_ix in range(rollout_data[ACTION].shape[0]):
+        # + 2 to include the first done frame and the last observation frame.
+        num_frames = done_indices[ep_ix].item() + 2
+        total_frames += num_frames
+
+        # Here we do `num_frames - 1` as we don't want to include the last observation frame just yet.
+        ep_dict = {
+            ACTION: rollout_data[ACTION][ep_ix, : num_frames - 1],
+            "episode_index": torch.tensor([start_episode_index + ep_ix] * (num_frames - 1)),
+            "frame_index": torch.arange(0, num_frames - 1, 1),
+            "timestamp": torch.arange(0, num_frames - 1, 1) / fps,
+            DONE: rollout_data["done"][ep_ix, : num_frames - 1],
+            "next.success": rollout_data["success"][ep_ix, : num_frames - 1],
+            REWARD: rollout_data["reward"][ep_ix, : num_frames - 1].type(torch.float32),
+        }
+
+        # Add prev/pred actions if present in rollout_data
+        if PREV_ACTIONS in rollout_data:
+            ep_dict[PREV_ACTIONS] = rollout_data[PREV_ACTIONS][ep_ix, : num_frames - 1]
+        if PRED_ACTIONS in rollout_data:
+            ep_dict[PRED_ACTIONS] = rollout_data[PRED_ACTIONS][ep_ix, : num_frames - 1]
+        if PREV_ACTIONS_MASK in rollout_data:
+            ep_dict[PREV_ACTIONS_MASK] = rollout_data[PREV_ACTIONS_MASK][ep_ix, : num_frames - 1]
+        if PRED_ACTIONS_MASK in rollout_data:
+            ep_dict[PRED_ACTIONS_MASK] = rollout_data[PRED_ACTIONS_MASK][ep_ix, : num_frames - 1]
+
+        # For the last observation frame, all other keys will just be copy padded.
+        for k in ep_dict:
+            ep_dict[k] = torch.cat([ep_dict[k], ep_dict[k][-1:]])
+
+        for key in rollout_data[OBS_STR]:
+            ep_dict[key] = rollout_data[OBS_STR][key][ep_ix, :num_frames]
+
+        ep_dicts.append(ep_dict)
+
+    data_dict = {}
+    for key in ep_dicts[0]:
+        data_dict[key] = torch.cat([x[key] for x in ep_dicts])
+
+    data_dict["index"] = torch.arange(start_data_index, start_data_index + total_frames, 1)
+
+    return data_dict
+
 def rollout(
         env: gym.vector.VectorEnv,
         policy: PreTrainedPolicy,
@@ -99,6 +155,7 @@ def rollout(
         postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
         seeds: list[int] | None = None,
         return_observations: bool = False,
+        return_prev_pred_actions: bool = False,
         render_callback: Callable[[gym.vector.VectorEnv], None] | None = None,
 ) -> dict:
     """Run a batched policy rollout once through a batch of environments.
@@ -145,6 +202,10 @@ def rollout(
     all_rewards = []
     all_successes = []
     all_dones = []
+    all_prev_actions = []
+    all_pred_actions = []
+    all_prev_actions_mask = []
+    all_pred_actions_mask = []
 
     step = 0
     # Keep track of which environments are done.
@@ -175,7 +236,28 @@ def rollout(
 
         observation = preprocessor(observation)
         with torch.inference_mode():
-            action = policy.select_action(observation)
+            # Check if policy supports return_prev_pred and if we need to collect prev/pred actions
+            if return_prev_pred_actions and hasattr(policy, 'select_action'):
+                # Try to call with return_prev_pred=True
+                try:
+                    action_result = policy.select_action(observation, return_prev_pred=True)
+                    if isinstance(action_result, dict):
+                        action = action_result["action"]
+                        prev_actions = action_result.get("prev_actions")
+                        pred_actions = action_result.get("pred_actions")
+                        prev_actions_mask = action_result.get("prev_actions_mask")
+                        pred_actions_mask = action_result.get("pred_actions_mask")
+                    else:
+                        action = action_result
+                        prev_actions = pred_actions = prev_actions_mask = pred_actions_mask = None
+                except TypeError:
+                    # Policy doesn't support return_prev_pred argument
+                    action = policy.select_action(observation)
+                    prev_actions = pred_actions = prev_actions_mask = pred_actions_mask = None
+            else:
+                action = policy.select_action(observation)
+                prev_actions = pred_actions = prev_actions_mask = pred_actions_mask = None
+        
         action = postprocessor(action)
 
         action_transition = {"action": action}
@@ -213,6 +295,22 @@ def rollout(
             done = np.ones_like(done, dtype=bool)
 
         all_actions.append(torch.from_numpy(action_numpy))
+        
+        # Collect prev/pred actions if available
+        if return_prev_pred_actions:
+            if prev_actions is not None:
+                all_prev_actions.append(prev_actions.cpu())
+                all_pred_actions.append(pred_actions.cpu())
+                all_prev_actions_mask.append(prev_actions_mask.cpu())
+                all_pred_actions_mask.append(pred_actions_mask.cpu())
+            else:
+                # Create placeholder zeros when not available
+                batch_size = action_numpy.shape[0]
+                action_dim = action_numpy.shape[1]
+                all_prev_actions.append(torch.zeros(batch_size, 10, action_dim))
+                all_pred_actions.append(torch.zeros(batch_size, 10, action_dim))
+                all_prev_actions_mask.append(torch.zeros(batch_size, 10, dtype=torch.bool))
+                all_pred_actions_mask.append(torch.zeros(batch_size, 10, dtype=torch.bool))
         all_rewards.append(torch.from_numpy(reward))
         all_dones.append(torch.from_numpy(done))
         all_successes.append(torch.tensor(successes))
@@ -245,6 +343,13 @@ def rollout(
             if key.startswith(f"{OBS_STR}."):
                 stacked_observations[key] = torch.stack([obs[key] for obs in all_observations], dim=1)
         ret[OBS_STR] = stacked_observations
+
+    # Add prev/pred actions if collected
+    if return_prev_pred_actions and len(all_prev_actions) > 0:
+        ret[PREV_ACTIONS] = torch.stack(all_prev_actions, dim=1)
+        ret[PRED_ACTIONS] = torch.stack(all_pred_actions, dim=1)
+        ret[PREV_ACTIONS_MASK] = torch.stack(all_prev_actions_mask, dim=1)
+        ret[PRED_ACTIONS_MASK] = torch.stack(all_pred_actions_mask, dim=1)
 
     if hasattr(policy, "use_original_modules"):
         policy.use_original_modules()
@@ -324,6 +429,35 @@ def update_policy(
     return train_metrics, output_dict
 
 
+def fill_prev_pred_placeholders(batch: dict, action_dim: int, device: torch.device) -> dict:
+    """Fill placeholder fields for prev/pred actions if they don't exist in the batch.
+    
+    This is used to ensure offline batches (which don't have prev/pred actions) 
+    have the same structure as online batches.
+    
+    Args:
+        batch: The batch dictionary.
+        action_dim: The action dimension.
+        device: The device to create tensors on.
+        
+    Returns:
+        The batch with placeholder fields filled.
+    """
+    if PREV_ACTIONS not in batch:
+        batch_size = batch[ACTION].shape[0]
+        batch[PREV_ACTIONS] = torch.zeros(batch_size, 10, action_dim, device=device, dtype=batch[ACTION].dtype)
+    if PRED_ACTIONS not in batch:
+        batch_size = batch[ACTION].shape[0]
+        batch[PRED_ACTIONS] = torch.zeros(batch_size, 10, action_dim, device=device, dtype=batch[ACTION].dtype)
+    if PREV_ACTIONS_MASK not in batch:
+        batch_size = batch[ACTION].shape[0]
+        batch[PREV_ACTIONS_MASK] = torch.zeros(batch_size, 10, device=device, dtype=torch.bool)
+    if PRED_ACTIONS_MASK not in batch:
+        batch_size = batch[ACTION].shape[0]
+        batch[PRED_ACTIONS_MASK] = torch.zeros(batch_size, 10, device=device, dtype=torch.bool)
+    return batch
+
+
 def collect_episodes(
     env,
     policy: PreTrainedPolicy,
@@ -379,6 +513,7 @@ def collect_episodes(
             postprocessor=postprocessor,
             seeds=list(seeds) if seeds else None,
             return_observations=True,  # We need observations for dataset
+            return_prev_pred_actions=True,  # Collect prev/pred actions for online dataset
             render_callback=None,
         )
 
@@ -534,6 +669,31 @@ def add_episodes_to_dataset(
         #                 frame_dict["complementary_info.success"] = success_value
         #         else:
         #             frame_dict["complementary_info.success"] = success_value
+
+        # Add prev/pred actions if present in episode_data and in dataset features
+        if PREV_ACTIONS in episode_data and PREV_ACTIONS in online_dataset.features:
+            value = episode_data[PREV_ACTIONS][frame_idx]
+            if isinstance(value, torch.Tensor):
+                value = value.cpu().numpy()
+            frame_dict[PREV_ACTIONS] = value
+        
+        if PRED_ACTIONS in episode_data and PRED_ACTIONS in online_dataset.features:
+            value = episode_data[PRED_ACTIONS][frame_idx]
+            if isinstance(value, torch.Tensor):
+                value = value.cpu().numpy()
+            frame_dict[PRED_ACTIONS] = value
+        
+        if PREV_ACTIONS_MASK in episode_data and PREV_ACTIONS_MASK in online_dataset.features:
+            value = episode_data[PREV_ACTIONS_MASK][frame_idx]
+            if isinstance(value, torch.Tensor):
+                value = value.cpu().numpy()
+            frame_dict[PREV_ACTIONS_MASK] = value
+        
+        if PRED_ACTIONS_MASK in episode_data and PRED_ACTIONS_MASK in online_dataset.features:
+            value = episode_data[PRED_ACTIONS_MASK][frame_idx]
+            if isinstance(value, torch.Tensor):
+                value = value.cpu().numpy()
+            frame_dict[PRED_ACTIONS_MASK] = value
 
         # Log frame_dict keys and dataset features for first frame
         if frame_idx == 0:
@@ -718,6 +878,20 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 logging.info(
                     f"Using configuration from environment: fps={fps}, "
                 )
+            
+            # Add prev/pred actions features for online dataset
+            # Get action_dim from existing ACTION feature
+            if ACTION in features:
+                action_shape = features[ACTION].get("shape", (32,))
+                action_dim = action_shape[0] if isinstance(action_shape, (list, tuple)) else action_shape
+            else:
+                action_dim = 32  # Default to max_action_dim
+            
+            features[PREV_ACTIONS] = {"dtype": "float32", "shape": (10, action_dim), "names": None}
+            features[PRED_ACTIONS] = {"dtype": "float32", "shape": (10, action_dim), "names": None}
+            features[PREV_ACTIONS_MASK] = {"dtype": "bool", "shape": (10,), "names": None}
+            features[PRED_ACTIONS_MASK] = {"dtype": "bool", "shape": (10,), "names": None}
+            logging.info(f"Added prev/pred actions features with action_dim={action_dim}")
             
             # Create empty online dataset
             online_dataset = LeRobotDataset.create(
@@ -1109,6 +1283,9 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                     start_time = time.perf_counter()
                     offline_batch = next(offline_dl_iter)
                     offline_batch = preprocessor(offline_batch)
+                    # Fill placeholder fields for prev/pred actions (offline data doesn't have them)
+                    action_dim = offline_batch[ACTION].shape[-1]
+                    offline_batch = fill_prev_pred_placeholders(offline_batch, action_dim, device)
                     train_tracker.dataloading_s = time.perf_counter() - start_time
 
                     train_tracker, output_dict = update_policy(
@@ -1129,6 +1306,9 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                     offline_dl_iter = cycle(offline_dataloader)
                     offline_batch = next(offline_dl_iter)
                     offline_batch = preprocessor(offline_batch)
+                    # Fill placeholder fields for prev/pred actions (offline data doesn't have them)
+                    action_dim = offline_batch[ACTION].shape[-1]
+                    offline_batch = fill_prev_pred_placeholders(offline_batch, action_dim, device)
                     train_tracker, output_dict = update_policy(
                         train_tracker,
                         policy,

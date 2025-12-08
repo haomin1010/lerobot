@@ -1721,6 +1721,10 @@ class PI05Policy(PreTrainedPolicy):
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
+        # For prev/pred actions tracking
+        self._current_chunk = None  # Current predicted action chunk
+        self._chunk_step_idx = 0  # Current step index within the chunk
+        self._history_actions = deque(maxlen=10)  # History of executed actions (last 10)
 
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
@@ -1810,8 +1814,23 @@ class PI05Policy(PreTrainedPolicy):
         return actions
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
-        """Select a single action given environment observations."""
+    def select_action(self, batch: dict[str, Tensor], return_prev_pred: bool = False) -> Tensor | dict:
+        """Select a single action given environment observations.
+        
+        Args:
+            batch: Dictionary of observations.
+            return_prev_pred: If True, returns a dictionary containing:
+                - action: Current action to execute
+                - prev_actions: Previous 10 executed actions (zero-padded if not enough)
+                - pred_actions: Next 10 predicted actions (zero-padded if not enough)
+                - prev_actions_mask: Boolean mask indicating valid prev_actions
+                - pred_actions_mask: Boolean mask indicating valid pred_actions
+                When conditions are not met, prev/pred actions are all zeros with False masks.
+        
+        Returns:
+            If return_prev_pred is False: action tensor
+            If return_prev_pred is True: dictionary with action, prev/pred actions and masks
+        """
         assert not self._rtc_enabled(), (
             "RTC is not supported for select_action, use it with predict_action_chunk"
         )
@@ -1819,12 +1838,74 @@ class PI05Policy(PreTrainedPolicy):
         self.eval()
 
         # Action queue logic for n_action_steps > 1
-        if len(self._action_queue) == 0:
+        need_new_prediction = len(self._action_queue) == 0
+        if need_new_prediction:
             actions = self.predict_action_chunk(batch)
             # Transpose to get shape (n_action_steps, batch_size, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
+            # Store the full chunk for prev/pred extraction
+            self._current_chunk = actions  # (batch_size, chunk_size, action_dim)
+            self._chunk_step_idx = 0
 
-        return self._action_queue.popleft()
+        # Get current action
+        current_action = self._action_queue.popleft()
+        
+        if not return_prev_pred:
+            # Update history and step index
+            self._history_actions.append(current_action.clone())
+            self._chunk_step_idx += 1
+            return current_action
+        
+        # Prepare prev/pred actions with masks
+        batch_size = current_action.shape[0]
+        action_dim = current_action.shape[-1]
+        device = current_action.device
+        delta_replan = getattr(self.config, "delta_replan", 10)
+        
+        # Initialize with zeros and False masks
+        prev_actions = torch.zeros(batch_size, 10, action_dim, device=device, dtype=current_action.dtype)
+        pred_actions = torch.zeros(batch_size, 10, action_dim, device=device, dtype=current_action.dtype)
+        prev_actions_mask = torch.zeros(batch_size, 10, dtype=torch.bool, device=device)
+        pred_actions_mask = torch.zeros(batch_size, 10, dtype=torch.bool, device=device)
+        
+        # Check conditions for providing valid prev/pred actions:
+        # 1. Distance from last prediction >= delta_replan (i.e., at prediction boundary or past it)
+        # 2. Remaining steps in chunk > delta_replan
+        chunk_size = self._current_chunk.shape[1] if self._current_chunk is not None else 0
+        remaining_steps = chunk_size - self._chunk_step_idx
+        at_replan_boundary = need_new_prediction or (self._chunk_step_idx % delta_replan == 0)
+        has_enough_remaining = remaining_steps > delta_replan
+        
+        if at_replan_boundary and has_enough_remaining and self._current_chunk is not None:
+            # Fill prev_actions from history
+            history_list = list(self._history_actions)
+            num_history = len(history_list)
+            for i in range(min(num_history, 10)):
+                # Fill from most recent to oldest (index 9 is most recent, 0 is oldest)
+                idx = 9 - i
+                hist_idx = num_history - 1 - i
+                prev_actions[:, idx, :] = history_list[hist_idx]
+                prev_actions_mask[:, idx] = True
+            
+            # Fill pred_actions from current chunk (next 10 actions after current)
+            pred_start = self._chunk_step_idx + 1  # Start from next action
+            for i in range(10):
+                pred_idx = pred_start + i
+                if pred_idx < chunk_size:
+                    pred_actions[:, i, :] = self._current_chunk[:, pred_idx, :]
+                    pred_actions_mask[:, i] = True
+        
+        # Update history and step index
+        self._history_actions.append(current_action.clone())
+        self._chunk_step_idx += 1
+        
+        return {
+            "action": current_action,
+            "prev_actions": prev_actions,
+            "pred_actions": pred_actions,
+            "prev_actions_mask": prev_actions_mask,
+            "pred_actions_mask": pred_actions_mask,
+        }
 
     def _should_replan(
         self,
@@ -1933,6 +2014,8 @@ class PI05Policy(PreTrainedPolicy):
 
         # Decide if replanning is needed (higher similarity = more different = need replan)
         should_replan = similarity > self._replan_threshold  # [batch_size] bool tensor
+        print("------------------------")
+        print(similarity)
         return should_replan, similarity
 
     @torch.no_grad()

@@ -62,6 +62,11 @@ class PI05Config(PreTrainedConfig):
             "VISUAL": NormalizationMode.IDENTITY,
             "STATE": NormalizationMode.QUANTILES,  # Pi0.5 uses quantiles for state
             "ACTION": NormalizationMode.QUANTILES,  # Pi0.5 uses quantiles for action
+            # prev/pred actions don't need normalization as they are already in action space
+            "prev_actions": NormalizationMode.IDENTITY,
+            "pred_actions": NormalizationMode.IDENTITY,
+            "prev_actions_mask": NormalizationMode.IDENTITY,
+            "pred_actions_mask": NormalizationMode.IDENTITY,
         }
     )
 
@@ -133,6 +138,29 @@ class PI05Config(PreTrainedConfig):
                 shape=(self.max_action_dim,),  # Padded to max_action_dim
             )
             self.output_features["action"] = action_feature
+
+        # Add prev/pred actions features for online training (used by CMP loss)
+        # These are optional inputs - they will be zeros with False masks for offline data
+        if "prev_actions" not in self.input_features:
+            self.input_features["prev_actions"] = PolicyFeature(
+                type=FeatureType.ACTION,
+                shape=(10, self.max_action_dim),
+            )
+        if "pred_actions" not in self.input_features:
+            self.input_features["pred_actions"] = PolicyFeature(
+                type=FeatureType.ACTION,
+                shape=(10, self.max_action_dim),
+            )
+        if "prev_actions_mask" not in self.input_features:
+            self.input_features["prev_actions_mask"] = PolicyFeature(
+                type=FeatureType.STATE,  # Using STATE type for boolean masks
+                shape=(10,),
+            )
+        if "pred_actions_mask" not in self.input_features:
+            self.input_features["pred_actions_mask"] = PolicyFeature(
+                type=FeatureType.STATE,  # Using STATE type for boolean masks
+                shape=(10,),
+            )
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
