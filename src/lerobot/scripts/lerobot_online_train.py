@@ -373,7 +373,8 @@ def add_episodes_to_dataset(
 
         # Save previous episode if episode index changed (new episode started)
         if current_episode_index is not None and episode_index != current_episode_index:
-            online_dataset.save_episode()
+            if online_dataset.episode_buffer is not None and online_dataset.episode_buffer["size"] > 0:
+                online_dataset.save_episode()
 
         # Add frame to dataset
         online_dataset.add_frame(frame_dict)
