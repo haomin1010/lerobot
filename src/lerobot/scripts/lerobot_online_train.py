@@ -496,10 +496,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 fps = offline_dataset.meta.fps
                 features = offline_dataset.meta.features.copy()
                 robot_type = offline_dataset.meta.robot_type
-                use_videos = offline_dataset.meta.use_videos
                 logging.info(
                     f"Using configuration from offline dataset: fps={fps}, "
-                    f"robot_type={robot_type}, use_videos={use_videos}"
                 )
             else:
                 # Get configuration from environment
@@ -541,12 +539,8 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 features[DONE] = {"dtype": "bool", "shape": (1,), "names": None}
                 
                 robot_type = None
-                use_videos = any(
-                    f.get("dtype") in ["image", "video"] for f in features.values()
-                )
                 logging.info(
                     f"Using configuration from environment: fps={fps}, "
-                    f"use_videos={use_videos}, features={list(features.keys())}"
                 )
             
             # Create empty online dataset
@@ -556,7 +550,6 @@ def online_train_main(cfg: OnlineTrainPipelineConfig, accelerator: Accelerator |
                 features=features,
                 root=online_dataset_root,
                 robot_type=robot_type,
-                use_videos=use_videos,
                 batch_encoding_size=cfg.dataset.video_encoding_batch_size if hasattr(cfg.dataset, "video_encoding_batch_size") else 1,
             )
             logging.info("Empty online dataset created successfully")
