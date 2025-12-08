@@ -2014,8 +2014,6 @@ class PI05Policy(PreTrainedPolicy):
 
         # Decide if replanning is needed (higher similarity = more different = need replan)
         should_replan = similarity > self._replan_threshold  # [batch_size] bool tensor
-        print("------------------------")
-        print(similarity)
         return should_replan, similarity
 
     @torch.no_grad()
